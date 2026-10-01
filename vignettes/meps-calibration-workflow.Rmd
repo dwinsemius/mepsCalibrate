@@ -1,0 +1,79 @@
+---
+title: "Calibrating Survey Data via Continuous Age-Quantile Pipelines"
+output: rmarkdown::html_vignette
+vignette: \(>   \%\VignetteIndexEntry{Calibrating Survey Data via Continuous Age-Quantile Pipelines}   \%\VignetteEngine{knitr::rmarkdown}   \%\VignetteEncoding{UTF-8}\)
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+This vignette maps out the complete pipeline for calibrating self-reported anthropometric survey data (such as height and weight from the Medical Expenditure Panel Survey) using continuous, measured reference distributions from the National Health and Nutrition Examination Survey (NHANES). 
+
+By evaluating continuous age as a flexible natural spline instead of using arbitrary age brackets, the functions borrow statistical strength across the distribution spectrum to smooth out digit preference heaping and reconstruct truncated upper tails.
+
+## 1. Setting Up the Target and Reference Data
+
+In a standard analysis workflow, you will read in your raw data frames directly from AHRQ and CDC repositories. For this guide, we generate a synthetic framework to mirror common survey artifacts:
+
+```r
+library(mepsCalibrate)
+library(mgcv)
+
+set.seed(101)
+n_records <- 1500
+
+# Synthetic NHANES Reference (Measured, Un-truncated)
+nhanes_df <- data.frame(
+  age   = runif(n_records, 18, 85),
+  sex   = sample(c("M", "F"), n_records, replace = TRUE),
+  race  = sample(c("White", "Black", "Hispanic"), n_records, replace = TRUE),
+  weight_measured = 130 + rnorm(n_records, 30, 15)
+)
+
+# Synthetic MEPS Target (Self-reported, Rounded, Top-Coded at 250 lbs)
+meps_df <- data.frame(
+  age   = runif(n_records, 18, 85),
+  sex   = sample(c("M", "F"), n_records, replace = TRUE),
+  race  = sample(c("White", "Black", "Hispanic"), n_records, replace = TRUE)
+)
+true_weights <- 125 + rnorm(n_records, 28, 15)
+meps_df$weight_reported <- round(true_weights / 5) * 5 # Digit heaping
+meps_df$weight_reported[meps_df$weight_reported >= 250] <- 250 # Truncation Wall
+meps_df$mortality <- rbinom(n_records, 1, 0.05) # Target outcome
+```
+
+## 2. Running the Stratified Calibration Pipeline
+
+The `meps_calibrate_pipeline` function automates the demographic partitioning. It splits the tables by your specified `strata_vars`, extracts smooth continuous quantile grids using natural age splines on the anchor dataset, and maps the target data directly into continuous U(0,1) copula space.
+
+```r
+meps_df$calibrated_weight_p <- meps_calibrate_pipeline(
+  meps_data      = meps_df,
+  nhanes_data    = nhanes_df,
+  reported_var   = "weight_reported",
+  measured_var   = "weight_measured",
+  truncation_val = 250,
+  strata_vars    = c("sex", "race"),
+  df             = 3
+)
+```
+
+## 3. Modeling the Overall Height-by-Weight Landscape
+
+Because the resulting vector is transformed into a continuous uniform coordinate system free of reporting heaps or truncation cliffs, you can plug it straight into localized spline engines. Decomposing the space into main effects and pure interactions (`ti`) allows you to isolate departures from the homogeneity assumption without your curves chasing behavioral noise:
+
+```r
+# Fit a piecewise exponential survival structure or a flexible GAM
+height_weight_gam <- gam(
+  mortality ~ s(age) + ti(calibrated_weight_p, k = 6),
+  family = binomial(),
+  data = meps_df,
+  method = "REML"
+)
+
+summary(height_weight_gam)
+```
