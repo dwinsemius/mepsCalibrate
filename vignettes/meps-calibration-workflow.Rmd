@@ -1,7 +1,10 @@
 ---
 title: "Calibrating Survey Data via Continuous Age-Quantile Pipelines"
 output: rmarkdown::html_vignette
-vignette: \(>   \%\VignetteIndexEntry{Calibrating Survey Data via Continuous Age-Quantile Pipelines}   \%\VignetteEngine{knitr::rmarkdown}   \%\VignetteEncoding{UTF-8}\)
+vignette: >
+  %\VignetteIndexEntry{Calibrating Survey Data via Continuous Age-Quantile Pipelines}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
 ---
 
 ```{r, include = FALSE}
