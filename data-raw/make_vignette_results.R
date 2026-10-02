@@ -5,7 +5,8 @@
 ## files are not shipped and the engine fits take about 10 minutes), so it reads these.
 ## Inputs (saved by the other data-raw scripts, in the htwt-mortality-surface folder):
 ##   nhanes3_calibration_engine.rds, nhis_report_curves.rds, nhis_calibrated_1987_1996.rds,
-##   tail_rule_comparison.rds, kl_tail_rule_comparison_design.rds, kl_contrasts_design.rds
+##   tail_rule_comparison.rds, kl_tail_rule_comparison_design.rds, kl_contrasts_design.rds,
+##   rank_regression_cv.csv, rank_regression_kl_contrast.csv, rank_regression_kl_by_group.csv
 ## Outputs: vignettes/results/*.csv and vignettes/figures/*.png.
 ## Run from ~/mepsCalibrate:  Rscript data-raw/make_vignette_results.R
 ## ============================================================
@@ -58,6 +59,10 @@ all_adults <- nrow(o); calib <- sum(!is.na(o$bmi_calibrated))
 w(data.frame(item = c("NHIS adults aged 20+, 1987-1996", "with a usable height and weight (calibrated)", "no usable height or weight (left NA)",
                       "squeezed (value capped, record kept)", "flagged implausible_htwt (all calibrated)"),
              n = c(all_adults, calib, all_adults - calib, sum(o$squeezed, na.rm = TRUE), sum(o$implausible_htwt %in% TRUE))), "cohort_counts.csv")
+
+## 6. rank regression (rank_regression_evaluation.R)
+for (f in c("rank_regression_cv.csv", "rank_regression_kl_contrast.csv", "rank_regression_kl_by_group.csv"))
+  file.copy(paste0(H, f), file.path("vignettes/results", f), overwrite = TRUE)
 
 ## figures (made by plot_calibration_engines.R)
 file.copy(list.files("figures", pattern = "\\.png$", full.names = TRUE), "vignettes/figures", overwrite = TRUE)

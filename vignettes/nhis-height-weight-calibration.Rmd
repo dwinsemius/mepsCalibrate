@@ -43,12 +43,21 @@ recoverable from the reported value by regression, and that such corrections can
 classification worse for the groups that matter most.
 
 Courtemanche and colleagues' alternative needs a much weaker assumption. It uses each report's
-**percentile rank within its own survey** and asks only that, within a survey, a higher report
-means a higher expected true value. Two surveys of the same population should have the same
-distribution of true values. So a person at the 80th percentile of NHIS reports is matched to
-the 80th percentile of NHANES III *measured* values, whatever the two surveys' reporting habits
-were. `mepsCalibrate` implements this with smooth quantile curves, so that age can enter as a
-continuous variable and no age cells go thin.
+**percentile rank within its own survey, computed separately for each race-by-sex group**, and
+asks only that, within a survey, a higher report means a higher expected true value. Two surveys
+of the same population should have the same distribution of true values, so a person at the 80th
+percentile of NHIS reports corresponds to the 80th percentile of NHANES III *measured* values,
+whatever the two surveys' reporting habits were. Their estimator then regresses measured values
+on a spline of that rank and a polynomial in age, within race-by-sex groups, which yields a
+conditional mean.
+
+`mepsCalibrate` offers two estimators built on the same idea, and they do different jobs.
+`apply_continuous_calibration()` reads the NHANES III measured quantile curve at the person's
+rank, which restores the **distribution**. `fit_rank_regression()` is the paper's estimator, a
+regression on rank and age, which predicts the **individual** value. Both use smooth functions of age
+so that no age cells go thin. The quantile version ranks within sex given age, not within race and
+sex as the paper does: the NHIS extract used here has no race variable. The rank regression accepts
+race-by-sex strata through its `strata` argument for data that have one.
 
 ## The method
 
@@ -73,9 +82,11 @@ continuous variable and no age cells go thin.
    Among NHIS adults in 1987-1996, people with BMI below 12 had about 3.4 times, and those
    with BMI of 60 to 80 about 4.1 times, the deaths expected for their age, sex and year.
 
-A second approach, `fit_conditional_mapping()`, regresses measured values directly on the
-report and age. It has lower individual error but shrinks the spread of values. It is
-described at the end.
+Two further estimators predict a person's own measured value instead of restoring a distribution:
+`fit_conditional_mapping()` regresses measured values on the raw report and age, and
+`fit_rank_regression()` regresses them on the report's rank within its own survey and age (the
+Courtemanche estimator). Both have lower individual error than quantile matching and both shrink the
+spread of values. They are compared at the end.
 
 ## A small simulation you can run
 
@@ -93,13 +104,14 @@ make_people <- function(n) {
 }
 A <- make_people(1500); B <- make_people(6000)       # same population, different samples
 
-# survey A: reports 1 cm too tall and 2% too light; survey B: 2.5 cm too tall and 7% too light
+# survey A: reports 1 cm too tall and 2% too light; survey B: 2.5 cm too tall and 7% too light;
+# reporting noise (SD 2-3 cm, 4-5 kg) is of the size seen in NHANES III
 ref <- data.frame(HSAGEIR = A$age, HSSEX = "1", SDPPHASE = 1, BMXHT = A$ht, BMXWT = A$wt,
-                  self_reported_height_cm = A$ht + 1 + rnorm(nrow(A), 0, 1),
-                  self_reported_weight_kg = A$wt * 0.98 + rnorm(nrow(A), 0, 1))
+                  self_reported_height_cm = A$ht + 1 + rnorm(nrow(A), 0, 2),
+                  self_reported_weight_kg = A$wt * 0.98 + rnorm(nrow(A), 0, 4))
 target <- data.frame(SEX = "1", AGE = B$age,
-                     Ht_m = (B$ht + 2.5 + rnorm(nrow(B), 0, 1.5)) / 100,
-                     BMXWT = B$wt * 0.93 + rnorm(nrow(B), 0, 1.5))
+                     Ht_m = (B$ht + 2.5 + rnorm(nrow(B), 0, 3)) / 100,
+                     BMXWT = B$wt * 0.93 + rnorm(nrow(B), 0, 5))
 true_bmi <- B$wt / (B$ht / 100)^2
 ```
 
@@ -129,6 +141,27 @@ kl <- vapply(list(raw_bmi, a_rank$calibrated_bmi, b_rank$calibrated_bmi),
 out <- cbind(round(out, 1), `KL from true` = c(NA, round(kl, 4)))
 knitr::kable(out, caption = "BMI in survey B: reported and calibrated against the truth. KL is the Kullback-Leibler divergence from the true distribution, in nats.")
 ```
+
+```{r individual, echo=FALSE}
+cm <- quiet(fit_conditional_mapping(ref))
+rr <- quiet(fit_rank_regression(ref))
+cd <- apply_conditional_calibration(target, cm)
+rg <- apply_rank_regression(target, rr)
+rmse <- function(x) sqrt(mean((x - B$wt)^2)); bias <- function(x) mean(x - B$wt)
+ind <- rbind(`reported` = c(bias(target$BMXWT), rmse(target$BMXWT)),
+             `conditional on the raw report (trained on A)` = c(bias(cd$conditional_weight_kg), rmse(cd$conditional_weight_kg)),
+             `quantile matching, ranked within B` = c(bias(b_rank$calibrated_weight_kg), rmse(b_rank$calibrated_weight_kg)),
+             `rank regression, ranked within B` = c(bias(rg$rankreg_weight_kg), rmse(rg$rankreg_weight_kg)))
+knitr::kable(round(ind, 2), col.names = c("Mean error (kg)", "RMSE (kg)"),
+             caption = "Survey B weight: error against each person's true weight.")
+```
+
+Reported weights are 7% low. The regression on the raw report, trained on survey A, repairs only the
+smaller bias A had, so most of B's under-reporting remains and its error stays large. Both methods
+that rank each report within B remove the bias, and their individual errors are close to each other
+and well below the others; here quantile matching is marginally the lower. This is a setting where the
+two surveys report differently. When they report alike, as when a model is tested inside NHANES III
+itself, the raw-report regression does best for individual values (see the last section).
 
 Ranking against survey A's report curves leaves survey B's extra under-reporting in place,
 because it treats B's respondents as if they reported like A's. Ranking within B recovers the
@@ -299,17 +332,55 @@ The NHANES III files are assembled by `assemble_nhanes3_data.R` in the
 `htwt-mortality-surface` project, which adds the self-reported height and weight and
 the examination substitution flags.
 
-## The conditional alternative
+## Predicting a person's own value: conditional mean and rank regression
 
-`fit_conditional_mapping()` and `apply_conditional_calibration()` predict the measured value
-from the person's own report and age. In five-fold cross-validation on NHANES III it had the lowest
-individual error: weight RMSE 4.41 kg, against 4.64 kg for raw self-report and 5.10 kg for rank
-matching. Rank matching ignores each person's own link between report and measurement, so it
-restores the distribution but adds individual-level noise. The conditional mean shrinks toward the
-group mean, so its distribution is narrower than the truth (weight SD 17.1 kg against 17.7 kg
-measured). Choose between them by purpose: rank matching for prevalence, distributions and the
-shape of surfaces; the conditional mean for a person-level covariate, bearing in mind that its
-spread is too small. An optional smoking-status term improved weight RMSE only from 4.414 to 4.397 kg.
+Quantile matching restores a distribution. Two methods instead predict each person's measured
+value as a conditional mean. `fit_conditional_mapping()` regresses it on the raw report and age.
+`fit_rank_regression()` is Courtemanche and colleagues' estimator: it regresses it on the report's
+**rank within its own survey** and age, so it keeps the portability of the rank. Both shrink toward
+the group mean, so their predictions are less spread out than true values.
+
+Five-fold cross-validation on NHANES III, weighted by the examination weight (ranks use only reports,
+so computing them in the whole survey leaks no measured values):
+
+```{r cv}
+cvt <- read.csv("results/rank_regression_cv.csv")
+tab(cvt, digits = c(0, 2, 2, 2), col.names = c("Method", "Height RMSE (cm)", "Weight RMSE (kg)", "SD of predicted weight (kg)"),
+    caption = "Weighted RMSE of measured height and weight. The measured weight SD is 17.9 kg. Quantile matching had a weighted weight RMSE of 4.80 kg in the same comparison.")
+```
+
+* **Height:** both conditional methods cut the error from 3.13 cm to about 2.6 cm.
+* **Weight:** the conditional regression on the raw report is best (4.04 kg against 4.27 for the raw
+  report). The rank regression is worse than the raw report (4.39 kg), though better than quantile matching
+  (4.80). Adding race-by-sex strata does not help (4.46 kg).
+
+This comparison cannot show the rank regression's advantage. Within NHANES III the rank is a
+monotone function of the report, so it carries the same information; what differs is only how
+flexibly each regression can follow it, and a nine-knot spline in rank is stiffer in the tails than a
+smooth of the report. The advantage is portability across surveys, which needs measured values in
+a second survey to test. The simulation above does show it: when the target's reports are biased differently,
+the rank regression removes a bias that the raw-report regression leaves.
+
+Applied to the NHIS cohort, how well does the rank regression reproduce the NHANES III
+measured BMI distribution? It is farther from it than quantile matching:
+
+```{r rrkl}
+rk <- read.csv("results/rank_regression_kl_contrast.csv")
+tab(data.frame(contrast = "own-rank exponential quantile matching minus rank regression",
+               diff = rk$diff_kl, se = rk$se_kl, z = rk$z_kl),
+    digits = c(0, 5, 5, 2), col.names = c("Contrast (forward KL)", "Difference (nats)", "Design SE", "z"))
+```
+
+The rank regression's KL from measured BMI is above the sampling baseline in all six groups (ratios
+1.6 to 2.9), and the paired contrast favours quantile matching (z = -3.1). The cause is regression to the
+mean: calibrated mean BMI is close (within about 0.5 kg/m^2), but the upper tail is pulled in. The share with BMI of 30 or more is
+22.4% in men aged 40-59 and 26.4% in women aged 40-59, against 25.1% and 30.3% in NHANES III.
+
+Choose by purpose. Quantile matching gives the right distribution, prevalences and surface shapes.
+For a per-person value, the conditional mean of the raw report has the lowest error in NHANES III but assumes
+the surveys' reporting habits match, while the rank regression drops that assumption at a modest cost
+in weight accuracy and in the tails. A smoking-status term in the raw-report regression improved weight
+RMSE only slightly (4.414 to 4.397 kg unweighted).
 
 ## Limitations
 
