@@ -14,7 +14,8 @@ apply_continuous_calibration(
   weight_col = "BMXWT",
   phase_col = NULL,
   exclude_col = "implausible_htwt",
-  rank_halfwidth = c(height_cm = 1.27, weight_kg = 0.227)
+  rank_halfwidth = c(height_cm = 1.27, weight_kg = 0.227),
+  tail = c("extrapolate", "clamp")
 )
 }
 \arguments{
@@ -47,6 +48,15 @@ interval of the reports (whole inches, whole pounds). The rank is the mid-rank
 over `report +- halfwidth`, so tied reports are not all pinned to one end.
 Use `c(0, 0)` to switch this off. Digit preference beyond simple rounding
 (heaping on multiples of 5 lb) is not corrected.}
+
+\item{tail}{How to treat reports beyond the outermost tau slice of the report curve
+(the top and bottom 1-2% with the default grids). `"extrapolate"` (the default)
+continues the end of the report-to-measured quantile map linearly, using its mean
+slope over the outermost five slices (bounded to 0.5-1.5, so an odd end segment
+cannot amplify an extreme report), so the tail keeps its spread; `"clamp"` returns the measured curve's outermost value and truncates the
+tail. Extrapolation needs the report and measured curves on the same tau grid
+(so not with a `survey_curves` grid that differs from the engine's); otherwise it
+falls back to clamping with a warning.}
 }
 \value{
 `survey_df` with `calibrated_height_m`, `calibrated_weight_kg` and
@@ -67,7 +77,8 @@ Stewart (2014) show fails across survey contexts. With `survey_curves` from
 [fit_survey_report_curves()], each report is ranked within its own survey,
 which needs only that reports preserve the ordering of true values.
 
-Ranks are interpolated linearly between adjacent tau slices and clamped at the
-first and last slice, so extreme tails are not extrapolated. Predictions are
+Ranks are interpolated linearly between adjacent tau slices. Reports beyond the
+first or last slice are extrapolated along the end of the report-to-measured map
+by default (see `tail`), or clamped. Predictions are
 computed once for each distinct (sex, age, phase) and matched back to rows.
 }

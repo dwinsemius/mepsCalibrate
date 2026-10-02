@@ -120,16 +120,46 @@ fit_calibration_curves <- function(nhanes_df, tau = seq(0.01, 0.99, by = 0.01),
 # the measured-quantile curve at the same tau. `halfwidth` > 0 takes the mid-rank over
 # the rounding interval (obs +- halfwidth), so reports heaped on whole inches or pounds
 # are not pinned to one end of their tied range.
+#
+# Reports beyond the outermost slice (past the first or last tau of the report curve):
+#   tail = "clamp"       -> the measured curve's outermost value (no extrapolation);
+#   tail = "extrapolate" -> continue the end of the report-to-measured quantile map
+#                           linearly, using its mean slope over the outermost `tail_slices`
+#                           slices (slope bounded to [0.5, 1.5], so a sparse or odd end segment cannot
+#                           amplify an extreme report), so the tail keeps its spread.
 .invert_rank <- function(sr_mat, cl_mat, obs,
                          sr_taus = seq_len(ncol(sr_mat)) / (ncol(sr_mat) + 1),
                          cl_taus = seq_len(ncol(cl_mat)) / (ncol(cl_mat) + 1),
-                         halfwidth = 0) {
+                         halfwidth = 0, tail = c("clamp", "extrapolate"), tail_slices = 5L) {
+  tail <- match.arg(tail)
   t <- if (halfwidth > 0) {
     (.rank_tau(sr_mat, sr_taus, obs - halfwidth) + .rank_tau(sr_mat, sr_taus, obs + halfwidth)) / 2
   } else {
     .rank_tau(sr_mat, sr_taus, obs)
   }
-  .read_curve(cl_mat, cl_taus, t)
+  out <- .read_curve(cl_mat, cl_taus, t)
+  n <- ncol(sr_mat)
+  if (tail == "extrapolate" && n >= 3 && ncol(cl_mat) == n) {
+    # the report and measured curves are compared slice by slice, so extrapolate only when
+    # the two grids coincide; otherwise fall back to clamping (see apply_continuous_calibration)
+    m <- min(as.integer(tail_slices), n - 1L)
+    ratio <- function(a, b) {                                   # mean slope of cl over sr across slices a..b
+      ds <- sr_mat[, b] - sr_mat[, a]; dc <- cl_mat[, b] - cl_mat[, a]
+      r <- ifelse(is.finite(ds) & ds > 0, dc / ds, 1)
+      pmin(pmax(r, 0.5), 1.5)
+    }
+    lo <- which(!is.na(obs) & obs < sr_mat[, 1])
+    if (length(lo)) {
+      r <- ratio(1L, m + 1L)[lo]
+      out[lo] <- cl_mat[cbind(lo, 1L)] + (obs[lo] - sr_mat[cbind(lo, 1L)]) * r
+    }
+    hi <- which(!is.na(obs) & obs > sr_mat[, n])
+    if (length(hi)) {
+      r <- ratio(n - m, n)[hi]
+      out[hi] <- cl_mat[cbind(hi, n)] + (obs[hi] - sr_mat[cbind(hi, n)]) * r
+    }
+  }
+  out
 }
 
 #' Fit Self-Report Quantile Curves on a Target Survey
@@ -216,8 +246,9 @@ fit_survey_report_curves <- function(survey_df, sex_col = "SEX", age_col = "AGE"
 #' [fit_survey_report_curves()], each report is ranked within its own survey,
 #' which needs only that reports preserve the ordering of true values.
 #'
-#' Ranks are interpolated linearly between adjacent tau slices and clamped at the
-#' first and last slice, so extreme tails are not extrapolated. Predictions are
+#' Ranks are interpolated linearly between adjacent tau slices. Reports beyond the
+#' first or last slice are extrapolated along the end of the report-to-measured map
+#' by default (see `tail`), or clamped. Predictions are
 #' computed once for each distinct (sex, age, phase) and matched back to rows.
 #'
 #' @param survey_df Data frame of records to adjust.
@@ -241,6 +272,14 @@ fit_survey_report_curves <- function(survey_df, sex_col = "SEX", age_col = "AGE"
 #'   over `report +- halfwidth`, so tied reports are not all pinned to one end.
 #'   Use `c(0, 0)` to switch this off. Digit preference beyond simple rounding
 #'   (heaping on multiples of 5 lb) is not corrected.
+#' @param tail How to treat reports beyond the outermost tau slice of the report curve
+#'   (the top and bottom 1-2% with the default grids). `"extrapolate"` (the default)
+#'   continues the end of the report-to-measured quantile map linearly, using its mean
+#'   slope over the outermost five slices (bounded to 0.5-1.5, so an odd end segment
+#'   cannot amplify an extreme report), so the tail keeps its spread; `"clamp"` returns the measured curve's outermost value and truncates the
+#'   tail. Extrapolation needs the report and measured curves on the same tau grid
+#'   (so not with a `survey_curves` grid that differs from the engine's); otherwise it
+#'   falls back to clamping with a warning.
 #' @return `survey_df` with `calibrated_height_m`, `calibrated_weight_kg` and
 #'   `calibrated_bmi` added (`NA` where a row was not calibrated).
 #' @export
@@ -250,7 +289,9 @@ apply_continuous_calibration <- function(survey_df, calibration_engine,
                                          height_col = "Ht_m", weight_col = "BMXWT",
                                          phase_col = NULL,
                                          exclude_col = "implausible_htwt",
-                                         rank_halfwidth = c(height_cm = 1.27, weight_kg = 0.227)) {
+                                         rank_halfwidth = c(height_cm = 1.27, weight_kg = 0.227),
+                                         tail = c("extrapolate", "clamp")) {
+  tail <- match.arg(tail)
   if (!inherits(calibration_engine, "meps_calibration_engine")) {
     stop("calibration_engine must come from fit_calibration_curves()")
   }
@@ -271,6 +312,11 @@ apply_continuous_calibration <- function(survey_df, calibration_engine,
   sex <- as.character(survey_df[[sex_col]])
   phase <- if (is.null(phase_col)) rep(1.5, nrow(survey_df)) else as.numeric(survey_df[[phase_col]])
   cl_taus <- attr(calibration_engine, "tau")
+  if (tail == "extrapolate" && !is.null(survey_curves) &&
+      !isTRUE(all.equal(attr(survey_curves, "tau"), cl_taus))) {
+    warning("survey_curves and the engine use different tau grids; tails are clamped, not extrapolated")
+    tail <- "clamp"
+  }
 
   for (s in names(calibration_engine)) {
     idx <- which(sex == s & !excl & !is.na(survey_df[[age_col]]) & !is.na(phase))
@@ -296,11 +342,11 @@ apply_continuous_calibration <- function(survey_df, calibration_engine,
     ht_cm <- .invert_rank(curves$sr_ht[row_to_key, , drop = FALSE],
                           curves$cl_ht[row_to_key, , drop = FALSE],
                           survey_df[[height_col]][idx] * 100,
-                          sr_taus = sr_taus, cl_taus = cl_taus, halfwidth = rank_halfwidth[[1]])
+                          sr_taus = sr_taus, cl_taus = cl_taus, halfwidth = rank_halfwidth[[1]], tail = tail)
     wt_kg <- .invert_rank(curves$sr_wt[row_to_key, , drop = FALSE],
                           curves$cl_wt[row_to_key, , drop = FALSE],
                           survey_df[[weight_col]][idx],
-                          sr_taus = sr_taus, cl_taus = cl_taus, halfwidth = rank_halfwidth[[2]])
+                          sr_taus = sr_taus, cl_taus = cl_taus, halfwidth = rank_halfwidth[[2]], tail = tail)
     survey_df$calibrated_height_m[idx] <- ht_cm / 100
     survey_df$calibrated_weight_kg[idx] <- wt_kg
   }

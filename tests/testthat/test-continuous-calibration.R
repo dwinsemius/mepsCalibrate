@@ -136,3 +136,36 @@ test_that("compare_calibrated_distribution returns reference, self-report and ca
   expect_true(all(c("q5", "q50", "q99", "ks_vs_ref") %in% names(out)))
   expect_true(all(out$ks_vs_ref[out$source != "reference"] >= 0))
 })
+
+test_that("tail extrapolation continues the end of the quantile map instead of clamping", {
+  sr <- matrix(rep(c(10, 20, 30, 40, 50, 60), each = 3), nrow = 3)
+  cl <- matrix(rep(c(100, 112, 124, 136, 148, 160), each = 3), nrow = 3)   # measured moves 1.2x the report
+  obs <- c(5, 35, 80)
+  expect_equal(mepsCalibrate:::.invert_rank(sr, cl, obs, tail = "clamp"), c(100, 130, 160))
+  expect_equal(mepsCalibrate:::.invert_rank(sr, cl, obs, tail = "extrapolate"), c(94, 130, 184))
+  # slope is bounded (at 1.5) so a degenerate end segment cannot explode the tail
+  cl2 <- cl; cl2[, 6] <- cl2[, 5] + 1e6
+  hi <- mepsCalibrate:::.invert_rank(sr, cl2, 61, tail = "extrapolate")
+  expect_equal(hi[1], cl2[1, 6] + 1.5 * 1)
+  # NA reports stay NA
+  expect_true(is.na(mepsCalibrate:::.invert_rank(sr[1, , drop = FALSE], cl[1, , drop = FALSE], NA_real_, tail = "extrapolate")))
+})
+
+test_that("extrapolated tails keep the spread that clamping removes", {
+  skip_if_not_installed("qgam")
+  set.seed(21)
+  n <- 3000; age <- runif(n, 20, 80)
+  wt <- exp(rnorm(n, log(75), 0.28))                 # right-skewed, long upper tail
+  nh <- data.frame(HSAGEIR = age, HSSEX = "1", SDPPHASE = 1, BMXHT = rnorm(n, 175, 7), BMXWT = wt,
+                   self_reported_height_cm = rnorm(n, 175, 7), self_reported_weight_kg = wt * 0.97)
+  tgt <- data.frame(SEX = "1", AGE = age, Ht_m = 1.75, BMXWT = wt * 0.97)
+  tau <- seq(0.05, 0.95, by = 0.05)
+  capture.output(eng <- suppressWarnings(suppressMessages(fit_calibration_curves(nh, tau = tau))))
+  cl <- apply_continuous_calibration(tgt, eng, tail = "clamp")
+  ex <- apply_continuous_calibration(tgt, eng, tail = "extrapolate")
+  top <- function(x) max(x$calibrated_weight_kg, na.rm = TRUE)
+  expect_gt(top(ex), top(cl))                         # the tail extends past the clamp
+  expect_lt(abs(top(ex) - max(wt)), abs(top(cl) - max(wt)))   # and lands closer to the true maximum
+  expect_identical(ex$calibrated_weight_kg[tgt$BMXWT > quantile(tgt$BMXWT, 0.2) & tgt$BMXWT < quantile(tgt$BMXWT, 0.8)],
+                   cl$calibrated_weight_kg[tgt$BMXWT > quantile(tgt$BMXWT, 0.2) & tgt$BMXWT < quantile(tgt$BMXWT, 0.8)])
+})
