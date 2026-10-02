@@ -169,3 +169,38 @@ test_that("extrapolated tails keep the spread that clamping removes", {
   expect_identical(ex$calibrated_weight_kg[tgt$BMXWT > quantile(tgt$BMXWT, 0.2) & tgt$BMXWT < quantile(tgt$BMXWT, 0.8)],
                    cl$calibrated_weight_kg[tgt$BMXWT > quantile(tgt$BMXWT, 0.2) & tgt$BMXWT < quantile(tgt$BMXWT, 0.8)])
 })
+
+test_that("squeeze caps values instead of dropping records, in both engines", {
+  skip_if_not_installed("qgam")
+  ref <- make_ref()
+  models <- suppressMessages(fit_conditional_mapping(ref, smoke_col = "smoke"))
+  sv <- data.frame(SEX = "1", AGE = c(40, 40, 40), Ht_m = c(1.75, 0.91, 2.6), BMXWT = c(80, 100, 90),
+                   smoke = "Never")
+  free <- apply_conditional_calibration(sv, models, smoke_col = "smoke")
+  sq <- apply_conditional_calibration(sv, models, smoke_col = "smoke",
+                                      squeeze = list(height_cm = c(122, 213), bmi = c(12, 80)))
+  expect_equal(nrow(sq), 3L)                                   # nothing dropped
+  expect_false(anyNA(sq$conditional_bmi))
+  expect_true(all(sq$conditional_height_m * 100 >= 122 - 1e-9 & sq$conditional_height_m * 100 <= 213 + 1e-9))
+  expect_true(all(sq$conditional_bmi <= 80 + 1e-9 & sq$conditional_bmi >= 12 - 1e-9))
+  expect_equal(sq$conditional_squeezed, c(FALSE, TRUE, TRUE))  # only the two absurd heights are changed
+  expect_equal(sq$conditional_weight_kg[1], free$conditional_weight_kg[1])   # ordinary rows untouched
+  expect_error(apply_conditional_calibration(sv, models, smoke_col = "smoke", squeeze = list(height = c(1, 2))), "squeeze")
+  expect_error(apply_conditional_calibration(sv, models, smoke_col = "smoke", squeeze = list(bmi = c(80, 12))), "squeeze")
+})
+
+test_that("slimmed fits predict exactly as the full fits and convergence is recorded", {
+  skip_if_not_installed("qgam")
+  set.seed(2); n <- 600
+  nh <- data.frame(HSAGEIR = runif(n, 20, 80), HSSEX = "1", SDPPHASE = 1, BMXHT = rnorm(n, 175, 7), BMXWT = rnorm(n, 80, 12),
+                   self_reported_height_cm = rnorm(n, 175, 7), self_reported_weight_kg = rnorm(n, 79, 12))
+  capture.output(eng <- suppressWarnings(suppressMessages(fit_calibration_curves(nh, tau = c(.25, .5, .75)))))
+  dg <- attr(eng, "diagnostics")
+  expect_true(all(c("sex", "outcome", "tau", "n", "convergence") %in% names(dg)))
+  expect_equal(nrow(dg), 4L * 3L)                                # 4 outcomes x 3 taus (one sex)
+  expect_false(any(is.na(dg$convergence)))
+  g <- eng[["1"]]$cl_wt$fit$fit[["0.5"]]
+  expect_null(g$residuals); expect_null(g$model)
+  nd <- data.frame(HSAGEIR = c(30, 50, 70), SDPPHASE = 1)
+  expect_equal(length(as.numeric(qgam::qdo(eng[["1"]]$cl_wt$fit, 0.5, predict, newdata = nd))), 3L)
+})

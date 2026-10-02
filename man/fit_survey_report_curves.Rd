@@ -12,7 +12,7 @@ fit_survey_report_curves(
   weight_col = "BMXWT",
   survey_weight_col = NULL,
   tau = seq(0.01, 0.99, by = 0.01),
-  exclude_col = "implausible_htwt",
+  exclude_col = NULL,
   max_n = NULL,
   seed = 1
 )

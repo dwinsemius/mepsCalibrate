@@ -12,7 +12,8 @@ apply_conditional_calibration(
   height_col = "Ht_m",
   weight_col = "BMXWT",
   smoke_col = NULL,
-  exclude_col = "implausible_htwt"
+  exclude_col = NULL,
+  squeeze = NULL
 )
 }
 \arguments{
@@ -36,11 +37,16 @@ treated as `"Unknown"` and a warning is issued.}
 \item{exclude_col}{Optional name of a logical column; rows where it is `TRUE`
 (for example `"implausible_htwt"`) are left uncalibrated (`NA`). Ignored if
 the column is absent.}
+
+\item{squeeze}{Optional limits, as in [apply_continuous_calibration()]: self-reports
+are capped before prediction, predictions are capped, and the BMI is capped
+last. Records are kept, not dropped. `conditional_squeezed` flags changed rows.}
 }
 \value{
-`survey_df` with `conditional_height_m`, `conditional_weight_kg` and
-  `conditional_bmi` added (`NA` where a row was not calibrated). The names
-  differ from the quantile-matching columns, so both can be kept side by side.
+`survey_df` with `conditional_height_m`, `conditional_weight_kg`,
+  `conditional_bmi` and `conditional_squeezed` added (`NA` where a row was not
+  calibrated). The names differ from the quantile-matching columns, so both can
+  be kept side by side.
 }
 \description{
 Predicts clinically measured height and weight from each record's own

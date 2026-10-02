@@ -13,9 +13,10 @@ apply_continuous_calibration(
   height_col = "Ht_m",
   weight_col = "BMXWT",
   phase_col = NULL,
-  exclude_col = "implausible_htwt",
+  exclude_col = NULL,
   rank_halfwidth = c(height_cm = 1.27, weight_kg = 0.227),
-  tail = c("extrapolate", "clamp")
+  tail = c("extrapolate", "clamp"),
+  squeeze = NULL
 )
 }
 \arguments{
@@ -57,10 +58,24 @@ cannot amplify an extreme report), so the tail keeps its spread; `"clamp"` retur
 tail. Extrapolation needs the report and measured curves on the same tau grid
 (so not with a `survey_curves` grid that differs from the engine's); otherwise it
 falls back to clamping with a warning.}
+
+\item{squeeze}{Optional named list of limits, `list(height_cm = c(lo, hi),
+weight_kg = c(lo, hi), bmi = c(lo, hi))` (any subset). Values outside a limit
+are **squeezed** to it, not dropped: reports are capped before they are ranked,
+calibrated heights and weights are capped on the way out, and the calibrated
+BMI is capped last. The record stays in the data, so a handful of extreme or
+erroneous values cannot distort the tails, and excluding them does not bias the
+sample (an excluded record is a missing value, and the extremes are often real:
+in NHIS 1987-96 adults with BMI below 12 or above 60 had 3-4 times the expected
+deaths). Suggested limits for adults: `height_cm = c(122, 213)` (4'0"-7'0"),
+`bmi = c(12, 80)`. `calibrated_squeezed` flags the rows that were changed.
+If a squeezed BMI no longer equals weight over height squared, the BMI is the
+capped value and the height and weight columns keep their own capped values.}
 }
 \value{
-`survey_df` with `calibrated_height_m`, `calibrated_weight_kg` and
-  `calibrated_bmi` added (`NA` where a row was not calibrated).
+`survey_df` with `calibrated_height_m`, `calibrated_weight_kg`,
+  `calibrated_bmi` and `calibrated_squeezed` (logical; only meaningful with
+  `squeeze`) added (`NA` where a row was not calibrated).
 }
 \description{
 Takes a survey data frame with self-reported height and weight (for example

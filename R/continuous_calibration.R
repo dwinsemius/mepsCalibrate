@@ -59,7 +59,7 @@ fit_calibration_curves <- function(nhanes_df, tau = seq(0.01, 0.99, by = 0.01),
   }
   attr(engine, "tau") <- tau
   class(engine) <- "meps_calibration_engine"
-  engine
+  .report_diagnostics(engine)
 }
 
 # One outcome, one sex: s(age) + linear phase, all taus via mqgam().
@@ -75,7 +75,43 @@ fit_calibration_curves <- function(nhanes_df, tau = seq(0.01, 0.99, by = 0.01),
     .y ~ s(HSAGEIR, bs = "cr")
   }
   fit <- qgam::mqgam(form, data = d, qu = tau, argGam = list(weights = d$.w))
-  list(fit = fit, tau = tau, age_range = range(d$HSAGEIR))
+  # convergence of each tau's fit, as reported by mgcv ("full convergence", "step failure", ...)
+  conv <- vapply(names(fit$fit), function(nm) {
+    cv <- fit$fit[[nm]]$outer.info$conv
+    if (is.null(cv)) NA_character_ else as.character(cv)[[1]]
+  }, character(1))
+  fit$fit <- lapply(fit$fit, .slim_gam)
+  list(fit = fit, tau = tau, age_range = range(d$HSAGEIR), conv = unname(conv), n = nrow(d))
+}
+
+# Drop the per-observation components a fitted gam carries but predict() never reads,
+# so a saved engine is a fraction of the size. Predictions are unchanged (tested).
+.slim_gam <- function(g) {
+  for (nm in c("residuals", "fitted.values", "linear.predictors", "weights", "prior.weights",
+               "y", "hat", "offset", "working.weights", "model", "na.action")) g[[nm]] <- NULL
+  g
+}
+
+# One row per sex x outcome x tau with mgcv's convergence message for that fit.
+.collect_diagnostics <- function(engine) {
+  do.call(rbind, lapply(names(engine), function(s) {
+    do.call(rbind, lapply(names(engine[[s]]), function(o) {
+      f <- engine[[s]][[o]]
+      data.frame(sex = s, outcome = o, tau = f$tau, n = f$n, convergence = f$conv,
+                 stringsAsFactors = FALSE)
+    }))
+  }))
+}
+.report_diagnostics <- function(engine) {
+  dg <- .collect_diagnostics(engine)
+  bad <- !is.na(dg$convergence) & dg$convergence != "full convergence"
+  if (any(bad)) {
+    message(sum(bad), " of ", nrow(dg), " quantile fits did not fully converge (",
+            paste(sort(unique(dg$convergence[bad])), collapse = "; "),
+            "); see attr(<engine>, \"diagnostics\") for the sex, outcome and tau of each.")
+  }
+  attr(engine, "diagnostics") <- dg
+  engine
 }
 
 # Predicted quantile curves (rows = newdata, columns = tau), sorted across tau so
@@ -86,6 +122,16 @@ fit_calibration_curves <- function(nhanes_df, tau = seq(0.01, 0.99, by = 0.01),
   }, numeric(nrow(newdata)))
   if (is.null(dim(P))) P <- matrix(P, nrow = nrow(newdata))
   t(apply(P, 1, sort))
+}
+
+# Squeeze (winsorize) values into [lo, hi]: keep the record, cap the value. NULL = no limits.
+.squeeze <- function(x, lim) if (is.null(lim)) x else pmin(pmax(x, lim[[1]]), lim[[2]])
+.check_squeeze <- function(squeeze) {
+  if (is.null(squeeze)) return(invisible(NULL))
+  bad <- setdiff(names(squeeze), c("height_cm", "weight_kg", "bmi"))
+  if (!is.list(squeeze) || length(bad) || any(vapply(squeeze, function(l) length(l) != 2 || l[[1]] >= l[[2]], logical(1))))
+    stop("`squeeze` must be a named list with elements from height_cm, weight_kg, bmi, each c(lower, upper)")
+  invisible(NULL)
 }
 
 # Position (a tau value) of each observed report on its own row's report-quantile
@@ -195,7 +241,7 @@ fit_survey_report_curves <- function(survey_df, sex_col = "SEX", age_col = "AGE"
                                      height_col = "Ht_m", weight_col = "BMXWT",
                                      survey_weight_col = NULL,
                                      tau = seq(0.01, 0.99, by = 0.01),
-                                     exclude_col = "implausible_htwt",
+                                     exclude_col = NULL,
                                      max_n = NULL, seed = 1) {
   miss <- setdiff(c(sex_col, age_col, height_col, weight_col, survey_weight_col), names(survey_df))
   if (length(miss)) stop("survey_df is missing column(s): ", paste(miss, collapse = ", "))
@@ -228,7 +274,7 @@ fit_survey_report_curves <- function(survey_df, sex_col = "SEX", age_col = "AGE"
   }
   attr(curves, "tau") <- tau
   class(curves) <- "meps_survey_report_curves"
-  curves
+  .report_diagnostics(curves)
 }
 
 #' Calibrate Survey Datasets Using Continuous Curve Inversion
@@ -280,18 +326,33 @@ fit_survey_report_curves <- function(survey_df, sex_col = "SEX", age_col = "AGE"
 #'   tail. Extrapolation needs the report and measured curves on the same tau grid
 #'   (so not with a `survey_curves` grid that differs from the engine's); otherwise it
 #'   falls back to clamping with a warning.
-#' @return `survey_df` with `calibrated_height_m`, `calibrated_weight_kg` and
-#'   `calibrated_bmi` added (`NA` where a row was not calibrated).
+#' @param squeeze Optional named list of limits, `list(height_cm = c(lo, hi),
+#'   weight_kg = c(lo, hi), bmi = c(lo, hi))` (any subset). Values outside a limit
+#'   are **squeezed** to it, not dropped: reports are capped before they are ranked,
+#'   calibrated heights and weights are capped on the way out, and the calibrated
+#'   BMI is capped last. The record stays in the data, so a handful of extreme or
+#'   erroneous values cannot distort the tails, and excluding them does not bias the
+#'   sample (an excluded record is a missing value, and the extremes are often real:
+#'   in NHIS 1987-96 adults with BMI below 12 or above 60 had 3-4 times the expected
+#'   deaths). Suggested limits for adults: `height_cm = c(122, 213)` (4'0"-7'0"),
+#'   `bmi = c(12, 80)`. `calibrated_squeezed` flags the rows that were changed.
+#'   If a squeezed BMI no longer equals weight over height squared, the BMI is the
+#'   capped value and the height and weight columns keep their own capped values.
+#' @return `survey_df` with `calibrated_height_m`, `calibrated_weight_kg`,
+#'   `calibrated_bmi` and `calibrated_squeezed` (logical; only meaningful with
+#'   `squeeze`) added (`NA` where a row was not calibrated).
 #' @export
 apply_continuous_calibration <- function(survey_df, calibration_engine,
                                          survey_curves = NULL,
                                          sex_col = "SEX", age_col = "AGE",
                                          height_col = "Ht_m", weight_col = "BMXWT",
                                          phase_col = NULL,
-                                         exclude_col = "implausible_htwt",
+                                         exclude_col = NULL,
                                          rank_halfwidth = c(height_cm = 1.27, weight_kg = 0.227),
-                                         tail = c("extrapolate", "clamp")) {
+                                         tail = c("extrapolate", "clamp"),
+                                         squeeze = NULL) {
   tail <- match.arg(tail)
+  .check_squeeze(squeeze)
   if (!inherits(calibration_engine, "meps_calibration_engine")) {
     stop("calibration_engine must come from fit_calibration_curves()")
   }
@@ -304,6 +365,7 @@ apply_continuous_calibration <- function(survey_df, calibration_engine,
 
   survey_df$calibrated_height_m <- NA_real_
   survey_df$calibrated_weight_kg <- NA_real_
+  survey_df$calibrated_squeezed <- NA
   excl <- if (!is.null(exclude_col) && exclude_col %in% names(survey_df)) {
     survey_df[[exclude_col]] %in% TRUE
   } else {
@@ -339,19 +401,28 @@ apply_continuous_calibration <- function(survey_df, calibration_engine,
       sr_wt = .predict_curves(rank_src$sr_wt, clamp(rank_src$sr_wt)),
       cl_wt = .predict_curves(eng$cl_wt, clamp(eng$cl_wt)))
 
+    raw_ht <- survey_df[[height_col]][idx] * 100
+    raw_wt <- survey_df[[weight_col]][idx]
+    in_ht <- .squeeze(raw_ht, squeeze$height_cm)
+    in_wt <- .squeeze(raw_wt, squeeze$weight_kg)
     ht_cm <- .invert_rank(curves$sr_ht[row_to_key, , drop = FALSE],
                           curves$cl_ht[row_to_key, , drop = FALSE],
-                          survey_df[[height_col]][idx] * 100,
+                          in_ht,
                           sr_taus = sr_taus, cl_taus = cl_taus, halfwidth = rank_halfwidth[[1]], tail = tail)
     wt_kg <- .invert_rank(curves$sr_wt[row_to_key, , drop = FALSE],
                           curves$cl_wt[row_to_key, , drop = FALSE],
-                          survey_df[[weight_col]][idx],
+                          in_wt,
                           sr_taus = sr_taus, cl_taus = cl_taus, halfwidth = rank_halfwidth[[2]], tail = tail)
-    survey_df$calibrated_height_m[idx] <- ht_cm / 100
-    survey_df$calibrated_weight_kg[idx] <- wt_kg
+    out_ht <- .squeeze(ht_cm, squeeze$height_cm)
+    out_wt <- .squeeze(wt_kg, squeeze$weight_kg)
+    survey_df$calibrated_height_m[idx] <- out_ht / 100
+    survey_df$calibrated_weight_kg[idx] <- out_wt
+    survey_df$calibrated_squeezed[idx] <- (in_ht != raw_ht) | (in_wt != raw_wt) | (out_ht != ht_cm) | (out_wt != wt_kg)
   }
 
-  survey_df$calibrated_bmi <- survey_df$calibrated_weight_kg / survey_df$calibrated_height_m^2
+  bmi <- survey_df$calibrated_weight_kg / survey_df$calibrated_height_m^2
+  survey_df$calibrated_bmi <- .squeeze(bmi, squeeze$bmi)
+  survey_df$calibrated_squeezed <- survey_df$calibrated_squeezed | (!is.na(bmi) & survey_df$calibrated_bmi != bmi)
   survey_df
 }
 
@@ -532,15 +603,21 @@ fit_conditional_mapping <- function(nhanes_df, weight_col = NULL, smoke_col = NU
 #'   the same levels as the reference data. Needed only if the models were
 #'   fitted with `smoke_col`; if it is `NULL` or absent then, every row is
 #'   treated as `"Unknown"` and a warning is issued.
-#' @return `survey_df` with `conditional_height_m`, `conditional_weight_kg` and
-#'   `conditional_bmi` added (`NA` where a row was not calibrated). The names
-#'   differ from the quantile-matching columns, so both can be kept side by side.
+#' @param squeeze Optional limits, as in [apply_continuous_calibration()]: self-reports
+#'   are capped before prediction, predictions are capped, and the BMI is capped
+#'   last. Records are kept, not dropped. `conditional_squeezed` flags changed rows.
+#' @return `survey_df` with `conditional_height_m`, `conditional_weight_kg`,
+#'   `conditional_bmi` and `conditional_squeezed` added (`NA` where a row was not
+#'   calibrated). The names differ from the quantile-matching columns, so both can
+#'   be kept side by side.
 #' @export
 apply_conditional_calibration <- function(survey_df, conditional_models,
                                           sex_col = "SEX", age_col = "AGE",
                                           height_col = "Ht_m", weight_col = "BMXWT",
                                           smoke_col = NULL,
-                                          exclude_col = "implausible_htwt") {
+                                          exclude_col = NULL,
+                                          squeeze = NULL) {
+  .check_squeeze(squeeze)
   if (!inherits(conditional_models, "meps_conditional_mapping")) {
     stop("conditional_models must come from fit_conditional_mapping()")
   }
@@ -555,6 +632,7 @@ apply_conditional_calibration <- function(survey_df, conditional_models,
 
   survey_df$conditional_height_m <- NA_real_
   survey_df$conditional_weight_kg <- NA_real_
+  survey_df$conditional_squeezed <- NA
   excl <- if (!is.null(exclude_col) && exclude_col %in% names(survey_df)) {
     survey_df[[exclude_col]] %in% TRUE
   } else {
@@ -569,12 +647,20 @@ apply_conditional_calibration <- function(survey_df, conditional_models,
     age <- pmin(pmax(as.numeric(survey_df[[age_col]][idx]), m$age_range[1]), m$age_range[2])
     ht_ok <- !is.na(survey_df[[height_col]][idx])
     wt_ok <- !is.na(survey_df[[weight_col]][idx])
+    sq <- rep(FALSE, length(idx))
     if (any(ht_ok)) {
-      nd <- data.frame(.x = survey_df[[height_col]][idx][ht_ok] * 100, HSAGEIR = age[ht_ok])
-      survey_df$conditional_height_m[idx[ht_ok]] <- as.numeric(stats::predict(m$ht_model, newdata = nd)) / 100
+      raw_ht <- survey_df[[height_col]][idx][ht_ok] * 100
+      in_ht <- .squeeze(raw_ht, squeeze$height_cm)
+      nd <- data.frame(.x = in_ht, HSAGEIR = age[ht_ok])
+      pred <- as.numeric(stats::predict(m$ht_model, newdata = nd))
+      out_ht <- .squeeze(pred, squeeze$height_cm)
+      survey_df$conditional_height_m[idx[ht_ok]] <- out_ht / 100
+      sq[ht_ok] <- sq[ht_ok] | (in_ht != raw_ht) | (out_ht != pred)
     }
     if (any(wt_ok)) {
-      nd <- data.frame(.x = survey_df[[weight_col]][idx][wt_ok], HSAGEIR = age[wt_ok])
+      raw_wt <- survey_df[[weight_col]][idx][wt_ok]
+      in_wt <- .squeeze(raw_wt, squeeze$weight_kg)
+      nd <- data.frame(.x = in_wt, HSAGEIR = age[wt_ok])
       if (!is.null(m$smoke_levels)) {
         raw <- if (have_smoke) survey_df[[smoke_col]][idx][wt_ok] else rep(NA, sum(wt_ok))
         nd$.smoke <- .smoke_factor(raw, levels = m$smoke_levels)
@@ -592,9 +678,14 @@ apply_conditional_calibration <- function(survey_df, conditional_models,
           }
         }
       }
-      survey_df$conditional_weight_kg[idx[wt_ok]] <- p
+      out_wt <- .squeeze(p, squeeze$weight_kg)
+      survey_df$conditional_weight_kg[idx[wt_ok]] <- out_wt
+      sq[wt_ok] <- sq[wt_ok] | (in_wt != raw_wt) | (out_wt != p)
     }
+    survey_df$conditional_squeezed[idx] <- sq
   }
-  survey_df$conditional_bmi <- survey_df$conditional_weight_kg / survey_df$conditional_height_m^2
+  bmi <- survey_df$conditional_weight_kg / survey_df$conditional_height_m^2
+  survey_df$conditional_bmi <- .squeeze(bmi, squeeze$bmi)
+  survey_df$conditional_squeezed <- survey_df$conditional_squeezed | (!is.na(bmi) & survey_df$conditional_bmi != bmi)
   survey_df
 }
