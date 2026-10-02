@@ -83,3 +83,56 @@ test_that("missing values never drop records", {
                  "smoking")
   expect_false(is.na(out3$conditional_weight_kg))
 })
+
+test_that(".invert_rank mid-rank and separate tau grids work", {
+  sr <- matrix(rep(c(10, 20, 30), each = 2), nrow = 2)
+  cl <- matrix(rep(c(100, 200, 300, 400, 500), each = 2), nrow = 2)
+  # report curve on taus (.25,.5,.75); measured curve on taus (.1,.3,.5,.7,.9)
+  out <- mepsCalibrate:::.invert_rank(sr, cl, c(20, 20), sr_taus = c(.25, .5, .75),
+                                      cl_taus = c(.1, .3, .5, .7, .9))
+  expect_equal(out, c(300, 300))                 # report sits at tau .5 -> measured curve's tau .5
+  # mid-rank over +-5 around a report of 15 averages tau(10) = .25 and tau(20) = .5
+  mid <- mepsCalibrate:::.invert_rank(sr[1, , drop = FALSE], cl[1, , drop = FALSE], 15,
+                                      sr_taus = c(.25, .5, .75), cl_taus = c(.1, .3, .5, .7, .9),
+                                      halfwidth = 5)
+  expect_equal(mid, 237.5)                       # tau = (.25 + .5)/2 = .375 -> 37.5% of the way from the .3 to the .5 curve
+})
+
+test_that("ranking within the target survey removes a reporting bias the NHANES curves cannot", {
+  skip_if_not_installed("qgam")
+  set.seed(11)
+  sim_true <- function(n) {
+    age <- runif(n, 20, 80)
+    data.frame(age = age, true = 170 - 0.1 * (age - 20) + rnorm(n, 0, 7))
+  }
+  a <- sim_true(1500); b <- sim_true(1500)        # same true distribution in both surveys
+  # NHANES-like survey: small, measured; target survey: reports run 4 cm low and noisier
+  nh <- data.frame(HSAGEIR = a$age, HSSEX = "1", SDPPHASE = 1, BMXHT = a$true, BMXWT = rnorm(1500, 70, 10),
+                   self_reported_height_cm = a$true + 1 + rnorm(1500, 0, 1),
+                   self_reported_weight_kg = rnorm(1500, 69, 10))
+  tgt <- data.frame(SEX = "1", AGE = b$age, Ht_m = (b$true - 3 + rnorm(1500, 0, 2)) / 100, BMXWT = rnorm(1500, 69, 10))
+  tau <- seq(0.05, 0.95, by = 0.05)
+  capture.output(
+    eng <- suppressWarnings(suppressMessages(fit_calibration_curves(nh, tau = tau))),
+    sc <- suppressWarnings(suppressMessages(fit_survey_report_curves(tgt, tau = tau))))
+  naive <- apply_continuous_calibration(tgt, eng)
+  fixed <- apply_continuous_calibration(tgt, eng, survey_curves = sc)
+  inner <- tgt$Ht_m * 100 > quantile(tgt$Ht_m * 100, 0.2) & tgt$Ht_m * 100 < quantile(tgt$Ht_m * 100, 0.8)
+  bias <- function(x) mean(x$calibrated_height_m[inner] * 100) - mean(b$true[inner])
+  # ranks are assigned by report, so compare the full calibrated distribution's centre instead
+  centre <- function(x) mean(x$calibrated_height_m * 100, na.rm = TRUE) - mean(b$true)
+  expect_gt(abs(centre(naive)), 2)               # NHANES curves: carries most of the 4 cm bias
+  expect_lt(abs(centre(fixed)), 1)               # own-survey ranks: recovers the true centre
+  expect_error(apply_continuous_calibration(tgt, eng, survey_curves = list()), "survey_curves")
+})
+
+test_that("compare_calibrated_distribution returns reference, self-report and calibrated rows", {
+  set.seed(3)
+  ref <- data.frame(HSSEX = "1", HSAGEIR = runif(400, 20, 79), BMXHT = rnorm(400, 175, 7), BMXWT = rnorm(400, 80, 12))
+  sv <- data.frame(SEX = "1", AGE = runif(400, 20, 79), Ht_m = rnorm(400, 1.75, 0.07), BMXWT = rnorm(400, 80, 12))
+  sv$calibrated_bmi <- sv$BMXWT / sv$Ht_m^2
+  out <- compare_calibrated_distribution(sv, ref)
+  expect_true(all(c("reference", "self_report", "calibrated") %in% out$source))
+  expect_true(all(c("q5", "q50", "q99", "ks_vs_ref") %in% names(out)))
+  expect_true(all(out$ks_vs_ref[out$source != "reference"] >= 0))
+})

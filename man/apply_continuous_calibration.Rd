@@ -7,18 +7,24 @@
 apply_continuous_calibration(
   survey_df,
   calibration_engine,
+  survey_curves = NULL,
   sex_col = "SEX",
   age_col = "AGE",
   height_col = "Ht_m",
   weight_col = "BMXWT",
   phase_col = NULL,
-  exclude_col = "implausible_htwt"
+  exclude_col = "implausible_htwt",
+  rank_halfwidth = c(height_cm = 1.27, weight_kg = 0.227)
 )
 }
 \arguments{
 \item{survey_df}{Data frame of records to adjust.}
 
-\item{calibration_engine}{Object returned by [fit_calibration_curves()].}
+\item{calibration_engine}{Object returned by [fit_calibration_curves()]; its
+measured curves always supply the output values.}
+
+\item{survey_curves}{Optional object from [fit_survey_report_curves()] fitted on
+`survey_df`'s survey. If `NULL`, the engine's own self-report curves are used.}
 
 \item{sex_col, age_col}{Names of the sex and age columns. Sex values are
 matched to the engine's sex levels as character strings (NHANES III
@@ -35,6 +41,12 @@ row uses 1.5, the midpoint of the two phases.}
 \item{exclude_col}{Optional name of a logical column; rows where it is `TRUE`
 (for example `"implausible_htwt"`) are left uncalibrated (`NA`). Ignored if
 the column is absent.}
+
+\item{rank_halfwidth}{Named numeric `c(height_cm, weight_kg)`: half the rounding
+interval of the reports (whole inches, whole pounds). The rank is the mid-rank
+over `report +- halfwidth`, so tied reports are not all pinned to one end.
+Use `c(0, 0)` to switch this off. Digit preference beyond simple rounding
+(heaping on multiples of 5 lb) is not corrected.}
 }
 \value{
 `survey_df` with `calibrated_height_m`, `calibrated_weight_kg` and
@@ -42,17 +54,20 @@ the column is absent.}
 }
 \description{
 Takes a survey data frame with self-reported height and weight (for example
-IPUMS NHIS), locates each person's self-report on the self-reported
-quantile curve for their sex, age and (optionally) survey phase to get a
-percentile rank, and reads the clinically measured quantile curve at that
-same rank. This is marginal quantile matching: it maps the self-report
-distribution onto the measured distribution at a given age and does not use
-the within-person link between a person's own report and measurement.
+IPUMS NHIS), locates each person's self-report on a self-reported quantile
+curve for their sex and age to get a percentile rank, and reads the clinically
+measured NHANES III quantile curve at that same rank.
 }
 \details{
-Ranks are interpolated linearly between adjacent tau slices. Self-reports
-beyond the first or last slice are clamped to that slice's measured value,
-so extreme tails are not extrapolated. Predictions are computed once for each
-distinct (sex, age, phase) combination and then matched back to rows.
-Self-reports heaped on whole inches or pounds share a rank, as they should.
+Which self-report curve supplies the rank matters. With `survey_curves = NULL`
+the rank comes from the NHANES III self-report curves, which silently assumes
+the target survey's respondents report as NHANES III's did (they were about to
+be measured). That is the transportability assumption Courtemanche, Pinkston &
+Stewart (2014) show fails across survey contexts. With `survey_curves` from
+[fit_survey_report_curves()], each report is ranked within its own survey,
+which needs only that reports preserve the ordering of true values.
+
+Ranks are interpolated linearly between adjacent tau slices and clamped at the
+first and last slice, so extreme tails are not extrapolated. Predictions are
+computed once for each distinct (sex, age, phase) and matched back to rows.
 }

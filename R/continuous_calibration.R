@@ -88,45 +88,143 @@ fit_calibration_curves <- function(nhanes_df, tau = seq(0.01, 0.99, by = 0.01),
   t(apply(P, 1, sort))
 }
 
-# Rank-matching inversion. For each row, find where the observed self-report sits
-# on the self-report quantile curve (linear interpolation between adjacent tau
-# slices, clamped to the first/last slice outside the grid), then read the
-# clinical curve at that same fractional position.
-.invert_rank <- function(sr_mat, cl_mat, obs) {
+# Position (a tau value) of each observed report on its own row's report-quantile
+# curve: linear between adjacent slices, clamped to the first/last slice.
+.rank_tau <- function(sr_mat, taus, obs) {
   n_tau <- ncol(sr_mat)
   k <- rowSums(sr_mat <= obs)                       # number of slices at or below obs
   out <- rep(NA_real_, length(obs))
   ok <- !is.na(obs) & !is.na(k)
-  lo <- ok & k == 0
-  hi <- ok & k == n_tau
-  mid <- ok & k > 0 & k < n_tau
-  out[lo] <- cl_mat[cbind(which(lo), 1L)]
-  out[hi] <- cl_mat[cbind(which(hi), n_tau)]
-  i <- which(mid); kk <- k[i]
+  out[ok & k == 0] <- taus[1]
+  out[ok & k == n_tau] <- taus[n_tau]
+  i <- which(ok & k > 0 & k < n_tau); kk <- k[i]
   s0 <- sr_mat[cbind(i, kk)]; s1 <- sr_mat[cbind(i, kk + 1L)]
   frac <- ifelse(s1 > s0, (obs[i] - s0) / (s1 - s0), 0)
-  out[i] <- cl_mat[cbind(i, kk)] + frac * (cl_mat[cbind(i, kk + 1L)] - cl_mat[cbind(i, kk)])
+  out[i] <- taus[kk] + frac * (taus[kk + 1L] - taus[kk])
   out
+}
+
+# Value of each row's measured-quantile curve at a given tau (linear, clamped).
+.read_curve <- function(cl_mat, taus, t) {
+  n <- length(taus)
+  out <- rep(NA_real_, length(t))
+  i <- which(!is.na(t))
+  tt <- pmin(pmax(t[i], taus[1]), taus[n])
+  k <- pmin(findInterval(tt, taus), n - 1L)
+  frac <- (tt - taus[k]) / (taus[k + 1L] - taus[k])
+  out[i] <- cl_mat[cbind(i, k)] + frac * (cl_mat[cbind(i, k + 1L)] - cl_mat[cbind(i, k)])
+  out
+}
+
+# Rank-matching inversion. Locate each report on the report-quantile curve, then read
+# the measured-quantile curve at the same tau. `halfwidth` > 0 takes the mid-rank over
+# the rounding interval (obs +- halfwidth), so reports heaped on whole inches or pounds
+# are not pinned to one end of their tied range.
+.invert_rank <- function(sr_mat, cl_mat, obs,
+                         sr_taus = seq_len(ncol(sr_mat)) / (ncol(sr_mat) + 1),
+                         cl_taus = seq_len(ncol(cl_mat)) / (ncol(cl_mat) + 1),
+                         halfwidth = 0) {
+  t <- if (halfwidth > 0) {
+    (.rank_tau(sr_mat, sr_taus, obs - halfwidth) + .rank_tau(sr_mat, sr_taus, obs + halfwidth)) / 2
+  } else {
+    .rank_tau(sr_mat, sr_taus, obs)
+  }
+  .read_curve(cl_mat, cl_taus, t)
+}
+
+#' Fit Self-Report Quantile Curves on a Target Survey
+#'
+#' Fits smooth quantile curves of the survey's *own* self-reported height and
+#' weight, separately by sex, with age as a continuous smooth (same machinery as
+#' [fit_calibration_curves()], so no age strata are formed and no cells go thin).
+#' Pass the result to [apply_continuous_calibration()] as `survey_curves` so that
+#' each report is ranked within the survey that produced it and that rank is then
+#' read off the NHANES III *measured* curves.
+#'
+#' This is the percentile-rank correction of Courtemanche, Pinkston & Stewart
+#' (2014): it needs only that the expected measured value rise with the reported
+#' value, and it does not assume that respondents in the target survey misreport
+#' as NHANES III respondents did (NHANES respondents expect to be weighed and
+#' measured; NHIS respondents do not). It does assume the *true* distributions of
+#' height and weight match across the two surveys at a given sex and age.
+#'
+#' @inheritParams apply_continuous_calibration
+#' @param survey_df Data frame of the target survey (for example `nhis_pooled`).
+#' @param survey_weight_col Optional name of the survey-weight column (for NHIS,
+#'   `"PERWEIGHT"`), rescaled to mean 1 within each fit.
+#' @param tau Percentile slices, as in [fit_calibration_curves()]. Should cover the
+#'   same range as the NHANES III engine's grid (the two grids may differ).
+#' @param max_n Optional cap on rows used per sex. A simple random sample of rows is
+#'   drawn when a sex has more, which keeps the weighted fit unbiased and bounds the
+#'   cost on very large surveys.
+#' @param seed Seed for the subsample.
+#' @return An object of class `meps_survey_report_curves`: per sex, the `mqgam`
+#'   fits `sr_ht` and `sr_wt`; the tau grid is in `attr(, "tau")`.
+#' @export
+fit_survey_report_curves <- function(survey_df, sex_col = "SEX", age_col = "AGE",
+                                     height_col = "Ht_m", weight_col = "BMXWT",
+                                     survey_weight_col = NULL,
+                                     tau = seq(0.01, 0.99, by = 0.01),
+                                     exclude_col = "implausible_htwt",
+                                     max_n = NULL, seed = 1) {
+  miss <- setdiff(c(sex_col, age_col, height_col, weight_col, survey_weight_col), names(survey_df))
+  if (length(miss)) stop("survey_df is missing column(s): ", paste(miss, collapse = ", "))
+  if (any(tau <= 0 | tau >= 1)) stop("tau must lie strictly between 0 and 1")
+  tau <- sort(unique(tau))
+
+  excl <- if (!is.null(exclude_col) && exclude_col %in% names(survey_df)) {
+    survey_df[[exclude_col]] %in% TRUE
+  } else {
+    rep(FALSE, nrow(survey_df))
+  }
+  d <- data.frame(HSSEX = as.character(survey_df[[sex_col]]),
+                  HSAGEIR = as.numeric(survey_df[[age_col]]),
+                  SDPPHASE = 1.5,                      # constant: no phase term is fitted
+                  self_reported_height_cm = survey_df[[height_col]] * 100,
+                  self_reported_weight_kg = survey_df[[weight_col]],
+                  .sw = if (is.null(survey_weight_col)) 1 else survey_df[[survey_weight_col]])
+  d <- d[!excl & !is.na(d$HSSEX) & !is.na(d$HSAGEIR), , drop = FALSE]
+
+  set.seed(seed)
+  curves <- list()
+  for (s in sort(unique(d$HSSEX))) {
+    sub <- d[d$HSSEX == s, , drop = FALSE]
+    if (!is.null(max_n) && nrow(sub) > max_n) sub <- sub[sample.int(nrow(sub), max_n), , drop = FALSE]
+    message("Fitting survey self-report curves for sex stratum: ", s, " (n = ", nrow(sub), ")")
+    wcol <- if (is.null(survey_weight_col)) NULL else ".sw"
+    curves[[s]] <- list(
+      sr_ht = .fit_outcome(sub, "self_reported_height_cm", tau, wcol),
+      sr_wt = .fit_outcome(sub, "self_reported_weight_kg", tau, wcol))
+  }
+  attr(curves, "tau") <- tau
+  class(curves) <- "meps_survey_report_curves"
+  curves
 }
 
 #' Calibrate Survey Datasets Using Continuous Curve Inversion
 #'
 #' Takes a survey data frame with self-reported height and weight (for example
-#' IPUMS NHIS), locates each person's self-report on the self-reported
-#' quantile curve for their sex, age and (optionally) survey phase to get a
-#' percentile rank, and reads the clinically measured quantile curve at that
-#' same rank. This is marginal quantile matching: it maps the self-report
-#' distribution onto the measured distribution at a given age and does not use
-#' the within-person link between a person's own report and measurement.
+#' IPUMS NHIS), locates each person's self-report on a self-reported quantile
+#' curve for their sex and age to get a percentile rank, and reads the clinically
+#' measured NHANES III quantile curve at that same rank.
 #'
-#' Ranks are interpolated linearly between adjacent tau slices. Self-reports
-#' beyond the first or last slice are clamped to that slice's measured value,
-#' so extreme tails are not extrapolated. Predictions are computed once for each
-#' distinct (sex, age, phase) combination and then matched back to rows.
-#' Self-reports heaped on whole inches or pounds share a rank, as they should.
+#' Which self-report curve supplies the rank matters. With `survey_curves = NULL`
+#' the rank comes from the NHANES III self-report curves, which silently assumes
+#' the target survey's respondents report as NHANES III's did (they were about to
+#' be measured). That is the transportability assumption Courtemanche, Pinkston &
+#' Stewart (2014) show fails across survey contexts. With `survey_curves` from
+#' [fit_survey_report_curves()], each report is ranked within its own survey,
+#' which needs only that reports preserve the ordering of true values.
+#'
+#' Ranks are interpolated linearly between adjacent tau slices and clamped at the
+#' first and last slice, so extreme tails are not extrapolated. Predictions are
+#' computed once for each distinct (sex, age, phase) and matched back to rows.
 #'
 #' @param survey_df Data frame of records to adjust.
-#' @param calibration_engine Object returned by [fit_calibration_curves()].
+#' @param calibration_engine Object returned by [fit_calibration_curves()]; its
+#'   measured curves always supply the output values.
+#' @param survey_curves Optional object from [fit_survey_report_curves()] fitted on
+#'   `survey_df`'s survey. If `NULL`, the engine's own self-report curves are used.
 #' @param sex_col,age_col Names of the sex and age columns. Sex values are
 #'   matched to the engine's sex levels as character strings (NHANES III
 #'   `HSSEX` and NHIS `SEX` both use 1 = male, 2 = female).
@@ -138,16 +236,26 @@ fit_calibration_curves <- function(nhanes_df, tau = seq(0.01, 0.99, by = 0.01),
 #' @param exclude_col Optional name of a logical column; rows where it is `TRUE`
 #'   (for example `"implausible_htwt"`) are left uncalibrated (`NA`). Ignored if
 #'   the column is absent.
+#' @param rank_halfwidth Named numeric `c(height_cm, weight_kg)`: half the rounding
+#'   interval of the reports (whole inches, whole pounds). The rank is the mid-rank
+#'   over `report +- halfwidth`, so tied reports are not all pinned to one end.
+#'   Use `c(0, 0)` to switch this off. Digit preference beyond simple rounding
+#'   (heaping on multiples of 5 lb) is not corrected.
 #' @return `survey_df` with `calibrated_height_m`, `calibrated_weight_kg` and
 #'   `calibrated_bmi` added (`NA` where a row was not calibrated).
 #' @export
 apply_continuous_calibration <- function(survey_df, calibration_engine,
+                                         survey_curves = NULL,
                                          sex_col = "SEX", age_col = "AGE",
                                          height_col = "Ht_m", weight_col = "BMXWT",
                                          phase_col = NULL,
-                                         exclude_col = "implausible_htwt") {
+                                         exclude_col = "implausible_htwt",
+                                         rank_halfwidth = c(height_cm = 1.27, weight_kg = 0.227)) {
   if (!inherits(calibration_engine, "meps_calibration_engine")) {
     stop("calibration_engine must come from fit_calibration_curves()")
+  }
+  if (!is.null(survey_curves) && !inherits(survey_curves, "meps_survey_report_curves")) {
+    stop("survey_curves must come from fit_survey_report_curves()")
   }
   need <- c(sex_col, age_col, height_col, weight_col, phase_col)
   miss <- setdiff(need, names(survey_df))
@@ -162,6 +270,7 @@ apply_continuous_calibration <- function(survey_df, calibration_engine,
   }
   sex <- as.character(survey_df[[sex_col]])
   phase <- if (is.null(phase_col)) rep(1.5, nrow(survey_df)) else as.numeric(survey_df[[phase_col]])
+  cl_taus <- attr(calibration_engine, "tau")
 
   for (s in names(calibration_engine)) {
     idx <- which(sex == s & !excl & !is.na(survey_df[[age_col]]) & !is.na(phase))
@@ -171,26 +280,105 @@ apply_continuous_calibration <- function(survey_df, calibration_engine,
     row_to_key <- match(do.call(paste, key), do.call(paste, ukey))
 
     eng <- calibration_engine[[s]]
+    rank_src <- if (is.null(survey_curves)) eng else {
+      if (is.null(survey_curves[[s]])) stop("survey_curves has no fit for sex stratum ", s)
+      survey_curves[[s]]
+    }
+    sr_taus <- if (is.null(survey_curves)) cl_taus else attr(survey_curves, "tau")
     # keep prediction ages inside each curve's fitted range
     clamp <- function(obj) transform(ukey, HSAGEIR = pmin(pmax(HSAGEIR, obj$age_range[1]), obj$age_range[2]))
     curves <- list(
-      sr_ht = .predict_curves(eng$sr_ht, clamp(eng$sr_ht)),
+      sr_ht = .predict_curves(rank_src$sr_ht, clamp(rank_src$sr_ht)),
       cl_ht = .predict_curves(eng$cl_ht, clamp(eng$cl_ht)),
-      sr_wt = .predict_curves(eng$sr_wt, clamp(eng$sr_wt)),
+      sr_wt = .predict_curves(rank_src$sr_wt, clamp(rank_src$sr_wt)),
       cl_wt = .predict_curves(eng$cl_wt, clamp(eng$cl_wt)))
 
     ht_cm <- .invert_rank(curves$sr_ht[row_to_key, , drop = FALSE],
                           curves$cl_ht[row_to_key, , drop = FALSE],
-                          survey_df[[height_col]][idx] * 100)
+                          survey_df[[height_col]][idx] * 100,
+                          sr_taus = sr_taus, cl_taus = cl_taus, halfwidth = rank_halfwidth[[1]])
     wt_kg <- .invert_rank(curves$sr_wt[row_to_key, , drop = FALSE],
                           curves$cl_wt[row_to_key, , drop = FALSE],
-                          survey_df[[weight_col]][idx])
+                          survey_df[[weight_col]][idx],
+                          sr_taus = sr_taus, cl_taus = cl_taus, halfwidth = rank_halfwidth[[2]])
     survey_df$calibrated_height_m[idx] <- ht_cm / 100
     survey_df$calibrated_weight_kg[idx] <- wt_kg
   }
 
   survey_df$calibrated_bmi <- survey_df$calibrated_weight_kg / survey_df$calibrated_height_m^2
   survey_df
+}
+
+# Weighted quantiles and the weighted Kolmogorov-Smirnov distance between two samples.
+.wquantile <- function(x, w, probs) {
+  o <- order(x); x <- x[o]; cw <- cumsum(w[o]) / sum(w)
+  vapply(probs, function(p) x[min(which(cw >= p))], numeric(1))
+}
+.wks <- function(x1, w1, x2, w2) {
+  g <- sort(unique(c(x1, x2)))
+  F1 <- stats::approx(sort(x1), cumsum(w1[order(x1)]) / sum(w1), g, method = "constant", yleft = 0, yright = 1, ties = "ordered")$y
+  F2 <- stats::approx(sort(x2), cumsum(w2[order(x2)]) / sum(w2), g, method = "constant", yleft = 0, yright = 1, ties = "ordered")$y
+  max(abs(F1 - F2))
+}
+
+#' Compare a Calibrated Survey's BMI Distribution with NHANES III
+#'
+#' The check proposed by Courtemanche, Pinkston & Stewart (2014): two surveys of
+#' the same population should have the same distribution of true BMI, so after a
+#' valid correction the target survey's calibrated BMI should match NHANES III's
+#' *measured* BMI. Reports weighted quantiles and the weighted
+#' Kolmogorov-Smirnov distance (a descriptive distance, not a test: with samples
+#' this large any difference is "significant") for the raw self-reported BMI and
+#' the calibrated BMI against the reference, by sex and age group.
+#'
+#' @param survey_df Output of [apply_continuous_calibration()].
+#' @param reference_df NHANES III data frame with `BMXHT` (cm), `BMXWT` (kg),
+#'   `HSAGEIR`, `HSSEX` (set unmeasured or substituted values to `NA`).
+#' @param survey_weight_col,reference_weight_col Names of the weight columns
+#'   (`NULL` for equal weights).
+#' @param age_breaks Age-group cut points (right-open).
+#' @param probs Quantile probabilities to report.
+#' @inheritParams apply_continuous_calibration
+#' @return A data frame with one row per sex x age group x source (`reference`,
+#'   `self_report`, `calibrated`): `n`, `mean`, the quantiles, and `ks_vs_ref`.
+#' @export
+compare_calibrated_distribution <- function(survey_df, reference_df,
+                                            survey_weight_col = NULL, reference_weight_col = NULL,
+                                            sex_col = "SEX", age_col = "AGE",
+                                            height_col = "Ht_m", weight_col = "BMXWT",
+                                            age_breaks = c(20, 40, 60, Inf),
+                                            probs = c(0.05, 0.25, 0.5, 0.75, 0.95, 0.99)) {
+  mk <- function(sex, age, bmi, w) {
+    data.frame(sex = as.character(sex), age = as.numeric(age), bmi = bmi,
+               w = if (is.null(w)) 1 else w)
+  }
+  ref <- mk(reference_df$HSSEX, reference_df$HSAGEIR,
+            reference_df$BMXWT / (reference_df$BMXHT / 100)^2,
+            if (is.null(reference_weight_col)) NULL else reference_df[[reference_weight_col]])
+  sw <- if (is.null(survey_weight_col)) NULL else survey_df[[survey_weight_col]]
+  raw <- mk(survey_df[[sex_col]], survey_df[[age_col]],
+            survey_df[[weight_col]] / survey_df[[height_col]]^2, sw)
+  cal <- mk(survey_df[[sex_col]], survey_df[[age_col]], survey_df$calibrated_bmi, sw)
+  rows <- list()
+  for (sx in sort(unique(ref$sex))) for (ab in levels(cut(c(age_breaks[-length(age_breaks)], 100), age_breaks, right = FALSE))) {
+    sel <- function(d) {
+      a <- cut(d$age, age_breaks, right = FALSE)
+      d[d$sex == sx & !is.na(a) & a == ab & !is.na(d$bmi) & !is.na(d$w) & d$w > 0, , drop = FALSE]
+    }
+    r <- sel(ref)
+    if (nrow(r) < 30) next
+    for (src in c("reference", "self_report", "calibrated")) {
+      d <- switch(src, reference = r, self_report = sel(raw), calibrated = sel(cal))
+      if (nrow(d) < 30) next
+      q <- .wquantile(d$bmi, d$w, probs); names(q) <- paste0("q", probs * 100)
+      rows[[length(rows) + 1L]] <- data.frame(
+        sex = sx, age_group = ab, source = src, n = nrow(d),
+        mean = stats::weighted.mean(d$bmi, d$w), as.list(q),
+        ks_vs_ref = if (src == "reference") NA_real_ else .wks(d$bmi, d$w, r$bmi, r$w),
+        check.names = FALSE)
+    }
+  }
+  do.call(rbind, rows)
 }
 
 #' Fit Conditional Error Mapping Functions
