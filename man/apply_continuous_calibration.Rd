@@ -15,7 +15,8 @@ apply_continuous_calibration(
   phase_col = NULL,
   exclude_col = NULL,
   rank_halfwidth = c(height_cm = 1.27, weight_kg = 0.227),
-  tail = c("extrapolate", "clamp"),
+  tail = c("extrapolate", "clamp", "exponential"),
+  tail_slope_bounds = c(0.5, 1.5),
   squeeze = NULL
 )
 }
@@ -58,6 +59,10 @@ cannot amplify an extreme report), so the tail keeps its spread; `"clamp"` retur
 tail. Extrapolation needs the report and measured curves on the same tau grid
 (so not with a `survey_curves` grid that differs from the engine's); otherwise it
 falls back to clamping with a warning.}
+
+\item{tail_slope_bounds}{Lower and upper bound on the tail slope used by
+`"extrapolate"` and `"exponential"`, so that an odd end segment cannot amplify an
+extreme report. Default `c(0.5, 1.5)`; use `c(0, Inf)` to remove the bound.}
 
 \item{squeeze}{Optional named list of limits, `list(height_cm = c(lo, hi),
 weight_kg = c(lo, hi), bmi = c(lo, hi))` (any subset). Values outside a limit

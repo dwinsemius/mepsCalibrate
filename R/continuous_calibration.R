@@ -162,6 +162,19 @@ fit_calibration_curves <- function(nhanes_df, tau = seq(0.01, 0.99, by = 0.01),
   out
 }
 
+# Exponential scale of a quantile curve's upper (or lower) tail, one value per row. If the tail
+# beyond the outermost slices is exponential, Q(p) = u + sigma * (-log(1 - p)) above and
+# Q(p) = l + sigma * log(p) below, so sigma is the slope of Q on -log(1-p) (or log p) across the
+# outermost `m` slices (a least-squares slope, so it uses all m slices, not just two).
+.tail_scale <- function(mat, taus, side = c("upper", "lower"), m = 5L) {
+  side <- match.arg(side)
+  n <- length(taus); m <- min(as.integer(m), n)
+  idx <- if (side == "upper") (n - m + 1L):n else seq_len(m)
+  x <- if (side == "upper") -log(1 - taus[idx]) else log(taus[idx])
+  cw <- (x - mean(x)) / sum((x - mean(x))^2)
+  as.numeric(mat[, idx, drop = FALSE] %*% cw)
+}
+
 # Rank-matching inversion. Locate each report on the report-quantile curve, then read
 # the measured-quantile curve at the same tau. `halfwidth` > 0 takes the mid-rank over
 # the rounding interval (obs +- halfwidth), so reports heaped on whole inches or pounds
@@ -171,12 +184,18 @@ fit_calibration_curves <- function(nhanes_df, tau = seq(0.01, 0.99, by = 0.01),
 #   tail = "clamp"       -> the measured curve's outermost value (no extrapolation);
 #   tail = "extrapolate" -> continue the end of the report-to-measured quantile map
 #                           linearly, using its mean slope over the outermost `tail_slices`
-#                           slices (slope bounded to [0.5, 1.5], so a sparse or odd end segment cannot
-#                           amplify an extreme report), so the tail keeps its spread.
+#                           slices (needs the two curves on the same tau grid);
+#   tail = "exponential" -> model both tails as exponential beyond their outermost slices.
+#                           Matching ranks then gives a linear map from the edge value with slope
+#                           sigma_measured / sigma_report (see .tail_scale); the two curves may use
+#                           different tau grids.
+# For both extrapolating rules the slope is bounded to `tail_slope_bounds` so a sparse or odd end
+# segment cannot amplify an extreme report.
 .invert_rank <- function(sr_mat, cl_mat, obs,
                          sr_taus = seq_len(ncol(sr_mat)) / (ncol(sr_mat) + 1),
                          cl_taus = seq_len(ncol(cl_mat)) / (ncol(cl_mat) + 1),
-                         halfwidth = 0, tail = c("clamp", "extrapolate"), tail_slices = 5L) {
+                         halfwidth = 0, tail = c("clamp", "extrapolate", "exponential"),
+                         tail_slices = 5L, tail_slope_bounds = c(0.5, 1.5)) {
   tail <- match.arg(tail)
   t <- if (halfwidth > 0) {
     (.rank_tau(sr_mat, sr_taus, obs - halfwidth) + .rank_tau(sr_mat, sr_taus, obs + halfwidth)) / 2
@@ -185,24 +204,30 @@ fit_calibration_curves <- function(nhanes_df, tau = seq(0.01, 0.99, by = 0.01),
   }
   out <- .read_curve(cl_mat, cl_taus, t)
   n <- ncol(sr_mat)
+  bound <- function(r) pmin(pmax(ifelse(is.finite(r), r, 1), tail_slope_bounds[[1]]), tail_slope_bounds[[2]])
+  lo <- which(!is.na(obs) & obs < sr_mat[, 1])
+  hi <- which(!is.na(obs) & obs > sr_mat[, n])
   if (tail == "extrapolate" && n >= 3 && ncol(cl_mat) == n) {
     # the report and measured curves are compared slice by slice, so extrapolate only when
     # the two grids coincide; otherwise fall back to clamping (see apply_continuous_calibration)
     m <- min(as.integer(tail_slices), n - 1L)
     ratio <- function(a, b) {                                   # mean slope of cl over sr across slices a..b
       ds <- sr_mat[, b] - sr_mat[, a]; dc <- cl_mat[, b] - cl_mat[, a]
-      r <- ifelse(is.finite(ds) & ds > 0, dc / ds, 1)
-      pmin(pmax(r, 0.5), 1.5)
+      bound(ifelse(is.finite(ds) & ds > 0, dc / ds, 1))
     }
-    lo <- which(!is.na(obs) & obs < sr_mat[, 1])
-    if (length(lo)) {
-      r <- ratio(1L, m + 1L)[lo]
-      out[lo] <- cl_mat[cbind(lo, 1L)] + (obs[lo] - sr_mat[cbind(lo, 1L)]) * r
-    }
-    hi <- which(!is.na(obs) & obs > sr_mat[, n])
+    if (length(lo)) out[lo] <- cl_mat[cbind(lo, 1L)] + (obs[lo] - sr_mat[cbind(lo, 1L)]) * ratio(1L, m + 1L)[lo]
+    if (length(hi)) out[hi] <- cl_mat[cbind(hi, n)] + (obs[hi] - sr_mat[cbind(hi, n)]) * ratio(n - m, n)[hi]
+  } else if (tail == "exponential" && n >= 3) {
+    # anchor at the report curve's edge slice: the measured curve's value at that same tau
     if (length(hi)) {
-      r <- ratio(n - m, n)[hi]
-      out[hi] <- cl_mat[cbind(hi, n)] + (obs[hi] - sr_mat[cbind(hi, n)]) * r
+      u_cl <- .read_curve(cl_mat, cl_taus, rep(sr_taus[n], nrow(sr_mat)))
+      r <- bound(.tail_scale(cl_mat, cl_taus, "upper", tail_slices) / .tail_scale(sr_mat, sr_taus, "upper", tail_slices))
+      out[hi] <- u_cl[hi] + r[hi] * (obs[hi] - sr_mat[cbind(hi, n)])
+    }
+    if (length(lo)) {
+      l_cl <- .read_curve(cl_mat, cl_taus, rep(sr_taus[1], nrow(sr_mat)))
+      r <- bound(.tail_scale(cl_mat, cl_taus, "lower", tail_slices) / .tail_scale(sr_mat, sr_taus, "lower", tail_slices))
+      out[lo] <- l_cl[lo] + r[lo] * (obs[lo] - sr_mat[cbind(lo, 1L)])
     }
   }
   out
@@ -326,6 +351,9 @@ fit_survey_report_curves <- function(survey_df, sex_col = "SEX", age_col = "AGE"
 #'   tail. Extrapolation needs the report and measured curves on the same tau grid
 #'   (so not with a `survey_curves` grid that differs from the engine's); otherwise it
 #'   falls back to clamping with a warning.
+#' @param tail_slope_bounds Lower and upper bound on the tail slope used by
+#'   `"extrapolate"` and `"exponential"`, so that an odd end segment cannot amplify an
+#'   extreme report. Default `c(0.5, 1.5)`; use `c(0, Inf)` to remove the bound.
 #' @param squeeze Optional named list of limits, `list(height_cm = c(lo, hi),
 #'   weight_kg = c(lo, hi), bmi = c(lo, hi))` (any subset). Values outside a limit
 #'   are **squeezed** to it, not dropped: reports are capped before they are ranked,
@@ -349,7 +377,8 @@ apply_continuous_calibration <- function(survey_df, calibration_engine,
                                          phase_col = NULL,
                                          exclude_col = NULL,
                                          rank_halfwidth = c(height_cm = 1.27, weight_kg = 0.227),
-                                         tail = c("extrapolate", "clamp"),
+                                         tail = c("extrapolate", "clamp", "exponential"),
+                                         tail_slope_bounds = c(0.5, 1.5),
                                          squeeze = NULL) {
   tail <- match.arg(tail)
   .check_squeeze(squeeze)
@@ -408,11 +437,13 @@ apply_continuous_calibration <- function(survey_df, calibration_engine,
     ht_cm <- .invert_rank(curves$sr_ht[row_to_key, , drop = FALSE],
                           curves$cl_ht[row_to_key, , drop = FALSE],
                           in_ht,
-                          sr_taus = sr_taus, cl_taus = cl_taus, halfwidth = rank_halfwidth[[1]], tail = tail)
+                          sr_taus = sr_taus, cl_taus = cl_taus, halfwidth = rank_halfwidth[[1]], tail = tail,
+                          tail_slope_bounds = tail_slope_bounds)
     wt_kg <- .invert_rank(curves$sr_wt[row_to_key, , drop = FALSE],
                           curves$cl_wt[row_to_key, , drop = FALSE],
                           in_wt,
-                          sr_taus = sr_taus, cl_taus = cl_taus, halfwidth = rank_halfwidth[[2]], tail = tail)
+                          sr_taus = sr_taus, cl_taus = cl_taus, halfwidth = rank_halfwidth[[2]], tail = tail,
+                          tail_slope_bounds = tail_slope_bounds)
     out_ht <- .squeeze(ht_cm, squeeze$height_cm)
     out_wt <- .squeeze(wt_kg, squeeze$weight_kg)
     survey_df$calibrated_height_m[idx] <- out_ht / 100

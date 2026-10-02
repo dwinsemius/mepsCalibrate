@@ -204,3 +204,43 @@ test_that("slimmed fits predict exactly as the full fits and convergence is reco
   nd <- data.frame(HSAGEIR = c(30, 50, 70), SDPPHASE = 1)
   expect_equal(length(as.numeric(qgam::qdo(eng[["1"]]$cl_wt$fit, 0.5, predict, newdata = nd))), 3L)
 })
+
+test_that(".tail_scale recovers the exponential scale of a quantile curve", {
+  taus <- seq(0.50, 0.98, by = 0.02)
+  q_up <- 150 + 2 * (-log(1 - taus))                       # Exponential(scale 2) above 150
+  expect_equal(mepsCalibrate:::.tail_scale(matrix(q_up, 2, byrow = TRUE, ncol = length(taus)), taus, "upper", 5L), c(2, 2))
+  tl <- seq(0.02, 0.50, by = 0.02)
+  q_lo <- 150 + 3 * log(tl)                                # mirrored exponential, scale 3
+  expect_equal(mepsCalibrate:::.tail_scale(matrix(q_lo, 2, byrow = TRUE, ncol = length(tl)), tl, "lower", 5L), c(3, 3))
+})
+
+test_that("exponential tail reproduces the exact map between two exponential tails, on different grids", {
+  q_sr <- function(p) 150 + 2 * (-log(1 - p))              # report distribution
+  q_cl <- function(p) 160 + 3 * (-log(1 - p))              # measured distribution; true map beyond the edge: slope 1.5
+  sr_taus <- seq(0.04, 0.98, by = 0.02); cl_taus <- seq(0.02, 0.98, by = 0.02)    # different grids
+  sr_mat <- matrix(rep(q_sr(sr_taus), each = 3), nrow = 3); cl_mat <- matrix(rep(q_cl(cl_taus), each = 3), nrow = 3)
+  obs <- c(q_sr(0.995), q_sr(0.999), q_sr(0.9999))
+  truth <- q_cl(c(0.995, 0.999, 0.9999))
+  got <- mepsCalibrate:::.invert_rank(sr_mat, cl_mat, obs, sr_taus = sr_taus, cl_taus = cl_taus, tail = "exponential")
+  expect_equal(got, truth, tolerance = 1e-8)
+  clamp <- mepsCalibrate:::.invert_rank(sr_mat, cl_mat, obs, sr_taus = sr_taus, cl_taus = cl_taus, tail = "clamp")
+  expect_true(all(clamp < truth - 4))                      # clamping truncates the tail
+  # the slope bound is honoured: with scales 2 and 9 the true slope is 4.5, bounded to 1.5
+  cl9 <- matrix(rep(160 + 9 * (-log(1 - cl_taus)), each = 3), nrow = 3)
+  o1 <- rep(obs[1], 3)
+  b <- mepsCalibrate:::.invert_rank(sr_mat, cl9, o1, sr_taus = sr_taus, cl_taus = cl_taus, tail = "exponential")
+  u <- mepsCalibrate:::.read_curve(cl9, cl_taus, rep(0.98, 3))[1]
+  expect_equal(b, rep(u + 1.5 * (obs[1] - sr_mat[1, ncol(sr_mat)]), 3))
+  nb <- mepsCalibrate:::.invert_rank(sr_mat, cl9, o1, sr_taus = sr_taus, cl_taus = cl_taus,
+                                     tail = "exponential", tail_slope_bounds = c(0, Inf))
+  expect_equal(nb, rep(160 + 9 * (-log(1 - 0.995)), 3), tolerance = 1e-8)      # unbounded: the exact map
+})
+
+test_that("exponential tail also works in the lower tail", {
+  tl <- seq(0.02, 0.98, by = 0.02)
+  sr_mat <- matrix(rep(150 + 2 * log(tl), each = 2), nrow = 2)   # lower tail: Q(p) = 150 + 2 log p
+  cl_mat <- matrix(rep(160 + 3 * log(tl), each = 2), nrow = 2)
+  obs <- 150 + 2 * log(0.005)
+  got <- mepsCalibrate:::.invert_rank(sr_mat, cl_mat, rep(obs, 2), sr_taus = tl, cl_taus = tl, tail = "exponential")
+  expect_equal(got, rep(160 + 3 * log(0.005), 2), tolerance = 1e-8)
+})
