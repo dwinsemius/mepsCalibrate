@@ -5,3 +5,4 @@
 ^vignettes/.*\.html$
 ^vignettes/.*\.pdf$
 ^tests/testthat/setup-.*\.R$
+^figures$
