@@ -14,7 +14,12 @@ distribution_divergence(
   n_grid = 1024L,
   regions = c(0, 0.25, 0.75, 0.95, 1),
   n_null = 0L,
-  seed = 1
+  seed = 1,
+  repx = NULL,
+  rep_scale = 1,
+  rep_rscales = NULL,
+  n_boot = 100L,
+  null_weights = c("reference", "none")
 )
 }
 \arguments{
@@ -39,6 +44,23 @@ range into regions for the contribution breakdown. Default splits at the
 \item{n_null}{Number of baseline resamples (0 = skip).}
 
 \item{seed}{Seed for the baseline resamples.}
+
+\item{repx}{Optional matrix of replicate weights for `x`, one row per element
+of `x` and one column per replicate (for example
+`weights(survey::as.svrepdesign(design, type = "JKn"), type = "analysis")`,
+subset to the rows of `x`; build the replicate design on the **whole**
+sample and then subset, so the domain estimate has the right variance). It
+gives a design-based standard error for each divergence.}
+
+\item{rep_scale, rep_rscales}{Scale and per-replicate scales for the variance
+(`design$scale` and `design$rscales` of the replicate design). Default
+`rep_rscales` is 1 for every replicate.}
+
+\item{n_boot}{Number of row-bootstrap resamples used for `se_iid`.}
+
+\item{null_weights}{`"reference"` (default) gives each baseline resample the
+reference's own weights, so the baseline includes the extra noise from
+unequal weights; `"none"` uses equal weights.}
 }
 \value{
 A list of class `distribution_divergence` with `kl` (reference to
@@ -49,7 +71,12 @@ A list of class `distribution_divergence` with `kl` (reference to
   splitting each direction's KL by region: `prob_lo`, `prob_hi`, `value_lo`,
   `value_hi`, `contribution` for `kl`, `contribution_rev` for `kl_rev`) and, if
   `n_null > 0`, `null` (the baseline KL values). A region's contribution can be
-  negative; each column sums to its KL.
+  negative; each column sums to its KL. With `repx` also `se` (design-based
+  standard errors of `kl`, `kl_rev`, `js`), `se_iid` (standard error of `kl` from a
+  row bootstrap that carries the weights but ignores strata and PSUs),
+  `cluster_effect` = (`se` / `se_iid`)^2, the extra variance from the design's
+  clustering and stratification, and, with `n_null`, `null_design` = `null` times
+  `cluster_effect`.
 }
 \description{
 Estimates the Kullback-Leibler divergence between a reference distribution and
@@ -76,3 +103,14 @@ the reference truly came from the comparison distribution. It ignores the
 variance added by unequal survey weights, so it understates the noise when
 the reference weights vary a lot.
 }
+\section{Design adjustment}{
+
+Near zero divergence KL behaves like a quadratic form in the estimation error,
+so its sampling baseline grows in proportion to the variance of the estimator,
+as in Lumley and Scott's design-effect adjustment of AIC (the penalty `p` becomes
+the trace of the generalised design effect matrix). `null_design` applies the
+estimated clustering factor to the weighted baseline. It is an approximation: it
+captures sampling variability of the reference sample only, not the variability
+from fitting the calibration curves on the same people.
+}
+
