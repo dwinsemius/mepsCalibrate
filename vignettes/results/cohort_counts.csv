@@ -1,0 +1,6 @@
+"item","n"
+"NHIS adults aged 20+, 1987-1996",776847
+"with a usable height and weight (calibrated)",758093
+"no usable height or weight (left NA)",18754
+"squeezed (value capped, record kept)",410
+"flagged implausible_htwt (all calibrated)",59

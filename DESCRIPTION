@@ -21,6 +21,7 @@ Imports:
     stats
 Suggests:
     ggplot2,
+    knitr,
     nhanesR,
     pammtools,
     purrr (>= 1.0.0),
