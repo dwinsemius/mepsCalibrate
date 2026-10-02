@@ -11,6 +11,7 @@ apply_conditional_calibration(
   age_col = "AGE",
   height_col = "Ht_m",
   weight_col = "BMXWT",
+  smoke_col = NULL,
   exclude_col = "implausible_htwt"
 )
 }
@@ -27,6 +28,11 @@ matched to the engine's sex levels as character strings (NHANES III
 
 \item{weight_col}{Name of the self-reported weight column, in kilograms.}
 
+\item{smoke_col}{Name of the smoking-status column in `survey_df`, coded to
+the same levels as the reference data. Needed only if the models were
+fitted with `smoke_col`; if it is `NULL` or absent then, every row is
+treated as `"Unknown"` and a warning is issued.}
+
 \item{exclude_col}{Optional name of a logical column; rows where it is `TRUE`
 (for example `"implausible_htwt"`) are left uncalibrated (`NA`). Ignored if
 the column is absent.}
@@ -40,4 +46,8 @@ the column is absent.}
 Predicts clinically measured height and weight from each record's own
 self-report and age, using the models from [fit_conditional_mapping()].
 Ages are clamped to each sex's fitted range; self-reports are not clamped.
+No record is dropped: a row with a missing self-report or age gets `NA` for
+that outcome, and a missing smoking status is treated as the reference
+`"Unknown"` level when the models saw one, or as an #' unseen level, so the weight prediction is averaged over the smoking levels
+(weighted by their share of the reference sample).
 }

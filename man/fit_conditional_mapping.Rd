@@ -4,7 +4,7 @@
 \alias{fit_conditional_mapping}
 \title{Fit Conditional Error Mapping Functions}
 \usage{
-fit_conditional_mapping(nhanes_df, weight_col = NULL)
+fit_conditional_mapping(nhanes_df, weight_col = NULL, smoke_col = NULL)
 }
 \arguments{
 \item{nhanes_df}{Data frame with columns `BMXHT`, `self_reported_height_cm`,
@@ -12,11 +12,14 @@ fit_conditional_mapping(nhanes_df, weight_col = NULL)
 
 \item{weight_col}{Optional name of a survey-weight column (for example
 `"WTPFEX6"`), rescaled to mean 1. Gives design-aware point estimates only.}
+
+\item{smoke_col}{Optional name of a smoking-status column (factor or
+character) to add to the weight model.}
 }
 \value{
 An object of class `meps_conditional_mapping`: a list with one element
-  per sex level, each a list with the `gam` fits `ht_model` and `wt_model` and
-  the fitted `age_range`.
+  per sex level, each a list with the `gam` fits `ht_model` and `wt_model`, the
+  fitted `age_range` and (if used) the `smoke_levels`.
 }
 \description{
 Direct regression of measured height and weight on the self-reported value
@@ -34,6 +37,13 @@ usual regression-to-the-mean), so it minimizes individual error but gives a
 calibrated distribution with less spread than the true measured one; use the
 quantile-matching pair when the shape of the whole distribution matters more
 than individual accuracy.
+
+If `smoke_col` is given, a smoking-status factor is added to the **weight**
+model as an additive shift. Missing smoking status is kept as its own
+`"Unknown"` level, never recoded as "never smoker". Supply one harmonized
+status, such as `Never`/`Former`/`Current`, built the same way in the
+reference and the target data: the raw NHANES III and NHIS smoking items use
+different codings and cannot be passed as they are.
 
 Clinically measured values that were substituted from the self-report
 (for example `BMPHTFLG` or `BMPWTFLG` nonzero) should be set to `NA` first.

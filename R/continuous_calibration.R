@@ -210,6 +210,13 @@ apply_continuous_calibration <- function(survey_df, calibration_engine,
 #' quantile-matching pair when the shape of the whole distribution matters more
 #' than individual accuracy.
 #'
+#' If `smoke_col` is given, a smoking-status factor is added to the **weight**
+#' model as an additive shift. Missing smoking status is kept as its own
+#' `"Unknown"` level, never recoded as "never smoker". Supply one harmonized
+#' status, such as `Never`/`Former`/`Current`, built the same way in the
+#' reference and the target data: the raw NHANES III and NHIS smoking items use
+#' different codings and cannot be passed as they are.
+#'
 #' Clinically measured values that were substituted from the self-report
 #' (for example `BMPHTFLG` or `BMPWTFLG` nonzero) should be set to `NA` first.
 #'
@@ -217,25 +224,37 @@ apply_continuous_calibration <- function(survey_df, calibration_engine,
 #'   `BMXWT`, `self_reported_weight_kg`, `HSAGEIR` and `HSSEX`.
 #' @param weight_col Optional name of a survey-weight column (for example
 #'   `"WTPFEX6"`), rescaled to mean 1. Gives design-aware point estimates only.
+#' @param smoke_col Optional name of a smoking-status column (factor or
+#'   character) to add to the weight model.
 #' @return An object of class `meps_conditional_mapping`: a list with one element
-#'   per sex level, each a list with the `gam` fits `ht_model` and `wt_model` and
-#'   the fitted `age_range`.
+#'   per sex level, each a list with the `gam` fits `ht_model` and `wt_model`, the
+#'   fitted `age_range` and (if used) the `smoke_levels`.
 #' @import mgcv
 #' @export
-fit_conditional_mapping <- function(nhanes_df, weight_col = NULL) {
+fit_conditional_mapping <- function(nhanes_df, weight_col = NULL, smoke_col = NULL) {
   need <- c("BMXHT", "self_reported_height_cm", "BMXWT", "self_reported_weight_kg",
-            "HSAGEIR", "HSSEX", weight_col)
+            "HSAGEIR", "HSSEX", weight_col, smoke_col)
   miss <- setdiff(need, names(nhanes_df))
   if (length(miss)) stop("nhanes_df is missing column(s): ", paste(miss, collapse = ", "))
   nhanes_df$HSSEX <- as.factor(nhanes_df$HSSEX)
+  if (!is.null(smoke_col)) nhanes_df$.smoke <- .smoke_factor(nhanes_df[[smoke_col]])
 
-  fit_one <- function(d, y, x) {
+  fit_one <- function(d, y, x, smoke = FALSE) {
     d <- d[stats::complete.cases(d[, c(y, x, "HSAGEIR")]), , drop = FALSE]
     d$.y <- d[[y]]; d$.x <- d[[x]]
     d$.w <- if (is.null(weight_col)) 1 else d[[weight_col]] / mean(d[[weight_col]], na.rm = TRUE)
     d <- d[!is.na(d$.w) & d$.w > 0, , drop = FALSE]
-    mgcv::gam(.y ~ s(.x, bs = "cr") + s(HSAGEIR, bs = "cr") + ti(.x, HSAGEIR, bs = "cr"),
-              data = d, weights = .w, method = "REML")
+    use_smoke <- smoke && nlevels(droplevels(d$.smoke)) > 1
+    if (smoke) d$.smoke <- droplevels(d$.smoke)
+    form <- if (use_smoke) {
+      .y ~ s(.x, bs = "cr") + s(HSAGEIR, bs = "cr") + .smoke + ti(.x, HSAGEIR, bs = "cr")
+    } else {
+      .y ~ s(.x, bs = "cr") + s(HSAGEIR, bs = "cr") + ti(.x, HSAGEIR, bs = "cr")
+    }
+    fit <- mgcv::gam(form, data = d, weights = .w, method = "REML")
+    attr(fit, "smoke_levels") <- if (use_smoke) levels(d$.smoke)
+    attr(fit, "smoke_props") <- if (use_smoke) prop.table(table(d$.smoke))
+    fit
   }
 
   cond_models <- list()
@@ -243,11 +262,24 @@ fit_conditional_mapping <- function(nhanes_df, weight_col = NULL) {
     sub_data <- nhanes_df[nhanes_df$HSSEX == s, , drop = FALSE]
     cond_models[[s]] <- list(
       ht_model = fit_one(sub_data, "BMXHT", "self_reported_height_cm"),
-      wt_model = fit_one(sub_data, "BMXWT", "self_reported_weight_kg"),
-      age_range = range(sub_data$HSAGEIR, na.rm = TRUE))
+      wt_model = fit_one(sub_data, "BMXWT", "self_reported_weight_kg", smoke = !is.null(smoke_col)),
+      age_range = range(sub_data$HSAGEIR, na.rm = TRUE),
+      smoke_levels = NULL)
+    cond_models[[s]]$smoke_levels <- attr(cond_models[[s]]$wt_model, "smoke_levels")
+    cond_models[[s]]$smoke_props <- attr(cond_models[[s]]$wt_model, "smoke_props")
   }
   class(cond_models) <- "meps_conditional_mapping"
   cond_models
+}
+
+# Smoking status as a factor with NA kept as an explicit "Unknown" level.
+.smoke_factor <- function(x, levels = NULL) {
+  x <- as.character(x)
+  x[is.na(x) | !nzchar(x)] <- "Unknown"
+  if (is.null(levels)) factor(x) else {
+    x[!x %in% levels] <- NA                         # a level the model never saw
+    factor(x, levels = levels)
+  }
 }
 
 #' Calibrate Survey Datasets with the Conditional Error Mapping
@@ -255,9 +287,17 @@ fit_conditional_mapping <- function(nhanes_df, weight_col = NULL) {
 #' Predicts clinically measured height and weight from each record's own
 #' self-report and age, using the models from [fit_conditional_mapping()].
 #' Ages are clamped to each sex's fitted range; self-reports are not clamped.
+#' No record is dropped: a row with a missing self-report or age gets `NA` for
+#' that outcome, and a missing smoking status is treated as the reference
+#' `"Unknown"` level when the models saw one, or as an #' unseen level, so the weight prediction is averaged over the smoking levels
+#' (weighted by their share of the reference sample).
 #'
 #' @inheritParams apply_continuous_calibration
 #' @param conditional_models Object returned by [fit_conditional_mapping()].
+#' @param smoke_col Name of the smoking-status column in `survey_df`, coded to
+#'   the same levels as the reference data. Needed only if the models were
+#'   fitted with `smoke_col`; if it is `NULL` or absent then, every row is
+#'   treated as `"Unknown"` and a warning is issued.
 #' @return `survey_df` with `conditional_height_m`, `conditional_weight_kg` and
 #'   `conditional_bmi` added (`NA` where a row was not calibrated). The names
 #'   differ from the quantile-matching columns, so both can be kept side by side.
@@ -265,12 +305,19 @@ fit_conditional_mapping <- function(nhanes_df, weight_col = NULL) {
 apply_conditional_calibration <- function(survey_df, conditional_models,
                                           sex_col = "SEX", age_col = "AGE",
                                           height_col = "Ht_m", weight_col = "BMXWT",
+                                          smoke_col = NULL,
                                           exclude_col = "implausible_htwt") {
   if (!inherits(conditional_models, "meps_conditional_mapping")) {
     stop("conditional_models must come from fit_conditional_mapping()")
   }
   miss <- setdiff(c(sex_col, age_col, height_col, weight_col), names(survey_df))
   if (length(miss)) stop("survey_df is missing column(s): ", paste(miss, collapse = ", "))
+  uses_smoke <- any(vapply(conditional_models, function(m) !is.null(m$smoke_levels), logical(1)))
+  have_smoke <- !is.null(smoke_col) && smoke_col %in% names(survey_df)
+  if (uses_smoke && !have_smoke) {
+    warning("models were fitted with a smoking term but smoke_col is missing; ",
+            "treating every row's smoking status as \"Unknown\"")
+  }
 
   survey_df$conditional_height_m <- NA_real_
   survey_df$conditional_weight_kg <- NA_real_
@@ -294,7 +341,24 @@ apply_conditional_calibration <- function(survey_df, conditional_models,
     }
     if (any(wt_ok)) {
       nd <- data.frame(.x = survey_df[[weight_col]][idx][wt_ok], HSAGEIR = age[wt_ok])
-      survey_df$conditional_weight_kg[idx[wt_ok]] <- as.numeric(stats::predict(m$wt_model, newdata = nd))
+      if (!is.null(m$smoke_levels)) {
+        raw <- if (have_smoke) survey_df[[smoke_col]][idx][wt_ok] else rep(NA, sum(wt_ok))
+        nd$.smoke <- .smoke_factor(raw, levels = m$smoke_levels)
+      }
+      p <- as.numeric(stats::predict(m$wt_model, newdata = nd))
+      if (!is.null(m$smoke_levels)) {
+        # status not seen in the reference data: average over the smoking levels,
+        # weighted by their share of the reference sample, rather than dropping the row
+        na <- which(is.na(nd$.smoke))
+        if (length(na)) {
+          p[na] <- 0
+          for (l in m$smoke_levels) {
+            nl <- nd[na, , drop = FALSE]; nl$.smoke <- factor(l, levels = m$smoke_levels)
+            p[na] <- p[na] + m$smoke_props[[l]] * as.numeric(stats::predict(m$wt_model, newdata = nl))
+          }
+        }
+      }
+      survey_df$conditional_weight_kg[idx[wt_ok]] <- p
     }
   }
   survey_df$conditional_bmi <- survey_df$conditional_weight_kg / survey_df$conditional_height_m^2
