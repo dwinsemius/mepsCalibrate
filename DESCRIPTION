@@ -1,22 +1,32 @@
 Package: mepsCalibrate
 Type: Package
-Title: Calibrate Self-Reported Survey Data to Objective Measured Anchors
+Title: Bivariate Percentile-Rank Calibration for Complex Survey Data
 Version: 0.1.0
-Author: AI Collaborator & User
-Maintainer: User <user@example.com>
-Description: Functions to handle digit preference heaping and survey tail 
-    truncation by mapping self-reported datasets (MEPS/NHIS) to continuous, 
-    measured reference distributions (NHANES) via continuous age-conditional 
-    quantile regression splines.
-License: MIT
+Authors@R: c(person('David', 'Winsemius', email = 'dwinsemius@comcast.net', role = c('aut', 'cre')))
+Description: Provides automated, boundary-clamped percentile-rank calibration
+    for continuous self-reported physical dimensions collected within
+    complex survey designs. Integrates 'nhanesR' and 'survey' frameworks.
+License: GPL (>= 3)
 Encoding: UTF-8
 LazyData: true
-Imports: 
+Depends:
+    R (>= 4.1.0),
+    survey (>= 4.1-1)
+Imports:
+    dplyr (>= 1.1.0),
+    mgcv,
+    qgam,
     quantreg,
-    splines
-Suggests: 
-    knitr,
+    rlang (>= 1.1.0),
+    stats
+Suggests:
+    ggplot2,
+    nhanesR,
+    pammtools,
+    purrr (>= 1.0.0),
     rmarkdown,
-    mgcv
-VignetteBuilder: knitr
+    testthat (>= 3.0.0),
+    tidyr (>= 1.3.0)
+VignetteBuilder:
+    knitr
 Config/roxygen2/version: 8.1.0

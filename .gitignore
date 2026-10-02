@@ -1,0 +1,20 @@
+# History files
+.Rhistory
+.RData
+.Ruserdata
+
+# Example models and temporary build elements
+crash.rda
+*.html
+*.pdf
+
+# RStudio files
+.Rproj.user/
+
+# devtools build artifacts
+*.tar.gz
+*.Rcheck/
+
+# OS-specific clutter
+.DS_Store
+Thumbs.db

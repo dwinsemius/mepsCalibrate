@@ -1,0 +1,7 @@
+^.*\.Rproj$
+^\..*\.Rproj\.user$
+^data-raw$
+^\.gitignore$
+^vignettes/.*\.html$
+^vignettes/.*\.pdf$
+^tests/testthat/setup-.*\.R$

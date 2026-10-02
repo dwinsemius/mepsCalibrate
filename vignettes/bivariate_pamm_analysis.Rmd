@@ -1,0 +1,45 @@
+---
+title: "Continuous Bivariate Calibration and PAMM Survival Estimation"
+author: "Thomas Lumley & David Winsemius Framework"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Continuous Bivariate Calibration and PAMM Survival Estimation}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+## Workflow Analysis
+This document outlines continuous physical variable transformations passing directly into Piecewise Exponential Additive Models (`pammtools`) and complex design-weighted tensor smoother survival loops (`mgcv::gam`).
+
+```{r simulation_run, message=FALSE}
+library(survey)
+library(dplyr)
+library(mgcv)
+library(pammtools)
+
+set.seed(42)
+n_obs <- 200
+meps_raw <- tibble(
+  id = 1:n_obs,
+Use code with caution.
+year = sample(2018:2021, n_obs, replace = TRUE),
+sex = sample(c(0, 1), n_obs, replace = TRUE),
+age = sample(18:85, n_obs, replace = TRUE),
+reported_wt = rnorm(n_obs, mean = 175, sd = 35),
+reported_ht = rnorm(n_obs, mean = 66, sd = 4),
+time_to_event = runif(n_obs, 0.1, 5.0),
+mortality_status = sample(c(0, 1), n_obs, replace = TRUE, prob = c(0.92, 0.08)),
+VARSTR = sample(1001:1010, n_obs, replace = TRUE),
+VARPSU = sample(1:2, n_obs, replace = TRUE),
+SAQWT24F = runif(n_obs, 500, 15000)
+)
+meps_design <- svydesign(ids = ~VARPSU, strata = ~VARSTR, weights = ~SAQWT24F, nest = TRUE, data = meps_raw)
+meps_ped <- as_ped(data = meps_design$variables, formula = Surv(time_to_event, mortality_status) ~ reported_ht + reported_wt + age + sex, id = "id")
+pamm_fit <- gam(ped_status ~ s(tend) + te(reported_ht, reported_wt) + sex, family = poisson(link = "log"), data = meps_ped, weights = meps_ped$SAQWT24F)
+summary(pamm_fit)
+```
