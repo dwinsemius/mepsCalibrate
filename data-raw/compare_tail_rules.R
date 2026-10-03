@@ -13,7 +13,7 @@ options(warn = -1, width = 220)
 H <- "/Users/dwinsemius/Documents/R.code/htwt-mortality-surface/"
 eng <- readRDS(paste0(H, "nhanes3_calibration_engine.rds")); sc <- readRDS(paste0(H, "nhis_report_curves.rds"))
 
-d <- readRDS(paste0(H, ".claude/worktrees/nhanes3-sr-mapping/nhanes3_pooled.rds"))
+d <- readRDS(paste0(H, "nhanes3_pooled.rds"))
 d <- d[d$WTPFEX6 > 0 & d$age >= 20 & d$measured_ht & d$measured_wt & !is.na(d$BMXHT) & !is.na(d$BMXWT), ]
 ref <- data.frame(sex = as.character(as.integer(d$HSSEX)), age = d$age, bmi = d$BMXWT / (d$BMXHT / 100)^2, w = d$WTPFEX6)
 v <- readRDS(paste0(H, "nhis_pooled.rds"))

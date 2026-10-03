@@ -13,7 +13,7 @@
 suppressMessages({devtools::load_all(quiet = TRUE); library(survey)})
 options(warn = -1, width = 220)
 H <- "/Users/dwinsemius/Documents/R.code/htwt-mortality-surface/"
-d <- readRDS(paste0(H, ".claude/worktrees/nhanes3-sr-mapping/nhanes3_pooled.rds"))
+d <- readRDS(paste0(H, "nhanes3_pooled.rds"))
 d0 <- d[d$WTPFEX6 > 0 & d$age >= 20, ]
 nh <- data.frame(HSAGEIR = d0$age, HSSEX = d0$HSSEX, race = d0$DMARETHN, WTPFEX6 = d0$WTPFEX6,
   BMXHT = ifelse(d0$measured_ht, d0$BMXHT, NA), BMXWT = ifelse(d0$measured_wt, d0$BMXWT, NA),

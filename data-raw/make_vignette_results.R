@@ -38,7 +38,7 @@ w(ct$pooled, "kl_contrasts_pooled.csv"); w(ct$by_group, "kl_contrasts_by_group.c
 
 ## 4. calibrated vs reported vs NHANES III measured, by sex and age
 o <- readRDS(paste0(H, "nhis_calibrated_1987_1996.rds"))
-d <- readRDS(paste0(H, ".claude/worktrees/nhanes3-sr-mapping/nhanes3_pooled.rds"))
+d <- readRDS(paste0(H, "nhanes3_pooled.rds"))
 d <- d[d$WTPFEX6 > 0 & d$age >= 20 & d$measured_ht & d$measured_wt & !is.na(d$BMXHT) & !is.na(d$BMXWT), ]
 ref <- data.frame(sex = as.integer(d$HSSEX), age = d$age, bmi = d$BMXWT / (d$BMXHT / 100)^2, w = d$WTPFEX6)
 ab <- function(a) cut(a, c(20, 40, 60, Inf), right = FALSE, labels = c("20-39", "40-59", "60+"))

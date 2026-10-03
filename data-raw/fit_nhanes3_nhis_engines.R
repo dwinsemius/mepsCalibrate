@@ -17,7 +17,7 @@ OUT <- H
 taus <- seq(0.02, 0.98, by = 0.02)
 
 ## ---- NHANES III reference: measured values only where not substituted from the report ----
-d <- readRDS(paste0(H, ".claude/worktrees/nhanes3-sr-mapping/nhanes3_pooled.rds"))
+d <- readRDS(paste0(H, "nhanes3_pooled.rds"))
 d <- d[d$WTPFEX6 > 0 & d$age >= 20, ]
 nh <- data.frame(HSAGEIR = d$age, HSSEX = d$HSSEX, SDPPHASE = d$SDPPHASE, WTPFEX6 = d$WTPFEX6,
   BMXHT = ifelse(d$measured_ht, d$BMXHT, NA), BMXWT = ifelse(d$measured_wt, d$BMXWT, NA),

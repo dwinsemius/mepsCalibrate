@@ -44,7 +44,7 @@ cat(sprintf("squeezed (kept, capped): %s (%.3f%%); bmi_calibrated range %.1f to 
 cat(sprintf("flagged implausible_htwt records: %d, all calibrated: %s\n", sum(out$implausible_htwt %in% TRUE), all(ok[out$implausible_htwt %in% TRUE])))
 
 ## ---- what calibration changed: weighted BMI summary vs NHANES III measured BMI ----
-d <- readRDS(paste0(H, ".claude/worktrees/nhanes3-sr-mapping/nhanes3_pooled.rds"))
+d <- readRDS(paste0(H, "nhanes3_pooled.rds"))
 d <- d[d$WTPFEX6 > 0 & d$age >= 20 & d$measured_ht & d$measured_wt & !is.na(d$BMXHT) & !is.na(d$BMXWT), ]
 ref <- data.frame(sex = as.integer(d$HSSEX), age = d$age, bmi = d$BMXWT / (d$BMXHT / 100)^2, w = d$WTPFEX6)
 ab <- function(a) cut(a, c(20, 40, 60, Inf), right = FALSE, labels = c("20-39", "40-59", "60+"))

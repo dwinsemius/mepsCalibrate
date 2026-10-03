@@ -16,7 +16,7 @@ options(warn = -1, width = 220)
 H <- "/Users/dwinsemius/Documents/R.code/htwt-mortality-surface/"
 saved <- readRDS(paste0(H, "calibrated_bmi_by_rule.rds"))
 bmi_of <- saved$bmi; v <- data.frame(SEX = saved$sex, AGE = saved$age, w = saved$w)
-d0 <- readRDS(paste0(H, ".claude/worktrees/nhanes3-sr-mapping/nhanes3_pooled.rds"))
+d0 <- readRDS(paste0(H, "nhanes3_pooled.rds"))
 d0 <- d0[d0$WTPFEX6 > 0 & d0$age >= 20, ]
 rd <- as.svrepdesign(svydesign(ids = ~SDPPSU6, strata = ~SDPSTRA6, weights = ~WTPFEX6, nest = TRUE, data = d0), type = "JKn")
 RW <- weights(rd, type = "analysis")
